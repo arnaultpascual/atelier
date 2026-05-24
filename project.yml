@@ -1,0 +1,112 @@
+name: Atelier
+options:
+  deploymentTarget:
+    macOS: "14.0"
+  bundleIdPrefix: app
+  developmentLanguage: en
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  groupSortPosition: top
+  xcodeVersion: "16.0"
+
+packages:
+  Subprocess:
+    url: https://github.com/swiftlang/swift-subprocess
+    exactVersion: "0.4.0"
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: "7.0.0"
+  Yams:
+    url: https://github.com/jpsim/Yams
+    from: "6.0.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    DEAD_CODE_STRIPPING: YES
+
+targets:
+  Atelier:
+    type: application
+    platform: macOS
+    sources:
+      - path: Atelier
+        excludes:
+          - "Info.plist"
+          - "Atelier.entitlements"
+          - "Resources/Skills/**"
+      - path: Atelier/Resources/Skills
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.atelier
+        PRODUCT_NAME: Atelier
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_FILE: Atelier/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Atelier/Atelier.entitlements
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        ENABLE_HARDENED_RUNTIME: YES
+        COMBINE_HIDPI_IMAGES: YES
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+    dependencies:
+      - package: Subprocess
+        product: Subprocess
+      - package: GRDB
+        product: GRDB
+      - package: Yams
+        product: Yams
+      - target: AtelierApprovalHelper
+    postBuildScripts:
+      # Place the approval helper next to the main binary in Contents/MacOS, where
+      # MCPConfig.helperPath() looks for it. This Run Script is a build phase, so it
+      # runs BEFORE the app's code-sign step: the helper is sealed into the bundle and
+      # carries its own signature from the AtelierApprovalHelper target (Hardened
+      # Runtime on; signed with Developer ID + --timestamp during a notarized archive).
+      # NB: XcodeGen's dependency `embed` mislocates a `tool` product into
+      # Contents/Resources, so we copy it here explicitly.
+      - name: Embed AtelierApprovalHelper into bundle
+        script: |
+          set -e
+          DEST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/MacOS"
+          mkdir -p "$DEST"
+          cp -f "${BUILT_PRODUCTS_DIR}/AtelierApprovalHelper" "$DEST/AtelierApprovalHelper"
+        inputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/AtelierApprovalHelper"
+        outputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/$(PRODUCT_NAME).app/Contents/MacOS/AtelierApprovalHelper"
+
+  AtelierApprovalHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - path: AtelierApprovalHelper
+    settings:
+      base:
+        PRODUCT_NAME: AtelierApprovalHelper
+        SKIP_INSTALL: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+
+schemes:
+  Atelier:
+    build:
+      targets:
+        Atelier: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

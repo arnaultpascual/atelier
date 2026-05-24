@@ -1,0 +1,36 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserdatad/
+*.xcuserstate
+xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Generated Xcode project (regenerated via `xcodegen generate`)
+Atelier.xcodeproj/
+
+# SPM
+.swiftpm/
+.build/
+Packages/
+Package.resolved
+
+# macOS
+.DS_Store
+
+# Atelier-specific
+.atelier-worktrees/
+.atelier/audit.jsonl
+
+# Local Claude Code settings (machine-specific permissions / paths — never publish)
+.claude/settings.local.json
+
+# Logs
+*.log
+
+# Secrets (defense in depth — should never end up here)
+*.p12
+*.cer
+*.mobileprovision
+.env
+.env.*
