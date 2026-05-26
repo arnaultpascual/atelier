@@ -114,6 +114,9 @@ private struct GeneralTab: View {
     @State private var savedOk: Bool = false
     @State private var claudeMdState: ClaudeMdState = .idle
     @State private var claudeMdExists: Bool = false
+    @State private var claudeMdDraft: String = ""        // editable copy of the drafted CLAUDE.md
+    @State private var claudeMdRendered: Bool = true      // Preview (rendered) vs Edit (raw)
+    @State private var showClaudeMdReview: Bool = false   // review in a roomy sheet, not the cramped pane
     @FocusState private var nameFocused: Bool
 
     private enum ClaudeMdState: Equatable {
@@ -141,6 +144,18 @@ private struct GeneralTab: View {
         .onAppear {
             loadDraft()
             checkClaudeMd()
+        }
+        .sheet(isPresented: $showClaudeMdReview) {
+            ClaudeMdReviewSheet(
+                markdown: $claudeMdDraft,
+                rendered: $claudeMdRendered,
+                exists: claudeMdExists,
+                onSave: {
+                    saveClaudeMd(claudeMdDraft)
+                    showClaudeMdReview = false
+                },
+                onClose: { showClaudeMdReview = false }
+            )
         }
     }
 
@@ -383,36 +398,21 @@ private struct GeneralTab: View {
                     .foregroundStyle(Color.atelierInkSecondary)
                 Spacer()
             }
-        case .preview(let md):
-            VStack(alignment: .leading, spacing: 8) {
-                ScrollView {
-                    Text(md)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(Color.atelierInk)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(10)
-                }
-                .frame(minHeight: 180, maxHeight: 320)
-                .background(Color.atelierSurface, in: RoundedRectangle(cornerRadius: 6))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.atelierDivider, lineWidth: 1))
-                HStack(spacing: 8) {
-                    Button("Discard") { claudeMdState = .idle }
-                        .controlSize(.small)
-                    Spacer()
-                    if claudeMdExists {
-                        Text("Will overwrite the existing CLAUDE.md.")
-                            .font(AtelierFont.caption)
-                            .foregroundStyle(Palette.warning)
-                    }
-                    Button {
-                        saveClaudeMd(md)
-                    } label: {
-                        Text("Save to CLAUDE.md").fontWeight(.semibold)
-                    }
+        case .preview:
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.circle").foregroundStyle(Palette.success)
+                Text("Draft ready (\(claudeMdDraft.count) chars) — review it in the editor.")
+                    .font(AtelierFont.caption)
+                    .foregroundStyle(Color.atelierInkSecondary)
+                Spacer()
+                Button("Discard") { claudeMdState = .idle }
                     .controlSize(.small)
-                    .keyboardShortcut(.defaultAction)
+                Button {
+                    showClaudeMdReview = true
+                } label: {
+                    Text("Review & save").fontWeight(.semibold)
                 }
+                .controlSize(.small)
             }
         case .error(let msg):
             HStack(spacing: 8) {
@@ -441,7 +441,12 @@ private struct GeneralTab: View {
                     projectName: projectName,
                     profile: profile
                 )
-                await MainActor.run { claudeMdState = .preview(md) }
+                await MainActor.run {
+                    claudeMdDraft = md
+                    claudeMdRendered = true       // open in readable Preview by default
+                    claudeMdState = .preview(md)
+                    showClaudeMdReview = true      // pop the roomy review sheet
+                }
             } catch {
                 await MainActor.run { claudeMdState = .error(error.localizedDescription) }
             }
@@ -488,6 +493,8 @@ private struct PermissionsTab: View {
             }
 
             CalloutBanner(.info, "Autopilot mode auto-accepts every tool call EXCEPT the deny rules here — add deny rules to constrain what unattended agents may do. (The General tab's auto-approve level applies only to manual spawns.)", icon: "infinity")
+
+            CalloutBanner(.warning, "Best-effort, not a hard boundary. Atelier gates every tool call through a hook and does its best to enforce these rules, but workers are AI — mistakes and edge cases happen. Treat this as a guardrail, keep sensitive paths on `deny`, and review anything that matters before trusting it unattended.")
 
             Divider().background(Color.atelierDivider).opacity(0.6)
 
@@ -697,5 +704,98 @@ private struct PermissionsTab: View {
         } catch {
             lastError = error.localizedDescription
         }
+    }
+}
+
+// MARK: - CLAUDE.md review sheet
+
+/// A roomy window for reviewing / editing a drafted CLAUDE.md, instead of
+/// cramming it into the settings pane. Preview renders the markdown; Edit gives
+/// a raw editor; Save writes it.
+private struct ClaudeMdReviewSheet: View {
+    @Binding var markdown: String
+    @Binding var rendered: Bool
+    let exists: Bool
+    let onSave: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider().background(Color.atelierDivider).opacity(0.6)
+            content
+            Divider().background(Color.atelierDivider).opacity(0.6)
+            footer
+        }
+        .frame(minWidth: 760, idealWidth: 920, maxWidth: 1300,
+               minHeight: 560, idealHeight: 760, maxHeight: 1200)
+        .background(Color.atelierBackground)
+    }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("CLAUDE.md")
+                    .font(AtelierFont.eyebrow)
+                    .foregroundStyle(Color.atelierAccent)
+                Text("Per-project instructions Claude reads at session start.")
+                    .font(AtelierFont.caption)
+                    .foregroundStyle(Color.atelierInkSecondary)
+            }
+            Spacer()
+            Picker("", selection: $rendered) {
+                Text("Preview").tag(true)
+                Text("Edit").tag(false)
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .frame(width: 170)
+            Text("\(markdown.count) chars")
+                .font(AtelierFont.captionMono)
+                .foregroundStyle(Color.atelierInkSecondary.opacity(0.8))
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if rendered {
+            ScrollView {
+                MarkdownView(source: markdown)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(24)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            TextEditor(text: $markdown)
+                .scrollContentBackground(.hidden)
+                .font(.system(.body, design: .monospaced))
+                .foregroundStyle(Color.atelierInk)
+                .padding(16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: 12) {
+            if exists {
+                Text("Will overwrite the existing CLAUDE.md.")
+                    .font(AtelierFont.caption)
+                    .foregroundStyle(Palette.warning)
+            }
+            Spacer()
+            Button("Close", action: onClose)
+                .keyboardShortcut(.cancelAction)
+            Button(action: onSave) {
+                Text("Save to CLAUDE.md").fontWeight(.semibold)
+            }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.defaultAction)
+            .disabled(markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 14)
     }
 }
