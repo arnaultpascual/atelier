@@ -304,6 +304,7 @@ private struct KanbanColumn: View {
     let status: AtelierTask.Status
     let tasks: [AtelierTask]
     @Binding var selectedTaskID: String?
+    @State private var isDropTargeted = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -344,7 +345,18 @@ private struct KanbanColumn: View {
         .frame(width: 280)
         .padding(12)
         .background(Color.atelierSurface.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.atelierDivider.opacity(0.5), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 12)
+            .stroke(isDropTargeted ? Color.atelierAccent : Color.atelierDivider.opacity(0.5),
+                    lineWidth: isDropTargeted ? 1.5 : 1))
+        .dropDestination(for: String.self) { ids, _ in
+            var moved = false
+            for id in ids {
+                guard let t = store.taskByID(id), t.status != status else { continue }
+                Task { try? await store.updateTaskStatus(t, to: status) }
+                moved = true
+            }
+            return moved
+        } isTargeted: { isDropTargeted = $0 }
     }
 
     @ViewBuilder
@@ -560,6 +572,7 @@ private struct TaskCard: View {
         }
         .animation(.easeInOut(duration: 0.12), value: hover)
         .onHover { hover = $0 }
+        .draggable(task.id)
     }
 
     private var spawnButton: some View {
