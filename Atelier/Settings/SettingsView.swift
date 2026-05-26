@@ -4,8 +4,8 @@ import SwiftUI
 
 /// Settings scene shown via ⌘, on macOS.
 ///
-/// Slice 1.4a scope is just the API key. 1.4b will add Project Profiles
-/// editing; 1.4c may add Telemetry / Theme / Diagnostics tabs.
+/// Tabs: Authentication (API key / OAuth), Alerts (daily budget), Skills
+/// (the bundled SKILL.md catalog), and Diagnostics (environment checks).
 struct SettingsView: View {
     var body: some View {
         TabView {

@@ -157,6 +157,9 @@ private struct GeneralTab: View {
 
     private var form: some View {
         VStack(alignment: .leading, spacing: 16) {
+            Text("IDENTITY")
+                .font(AtelierFont.eyebrow.weight(.semibold))
+                .foregroundStyle(Color.atelierInk)
             field(label: "NAME") {
                 TextField(project.name, text: $draftName)
                     .textFieldStyle(.roundedBorder)
@@ -177,6 +180,11 @@ private struct GeneralTab: View {
                         .foregroundStyle(Color.atelierInkSecondary)
                 }
             }
+
+            AtelierDivider().padding(.vertical, 2)
+            Text("EXECUTION DEFAULTS")
+                .font(AtelierFont.eyebrow.weight(.semibold))
+                .foregroundStyle(Color.atelierInk)
 
             field(label: "DEFAULT MODEL") {
                 Picker("", selection: $draftModel) {
@@ -228,9 +236,7 @@ private struct GeneralTab: View {
     @ViewBuilder
     private func field<Content: View>(label: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label)
-                .font(AtelierFont.eyebrow)
-                .foregroundStyle(Color.atelierInkSecondary)
+            SectionLabel(label)
             content()
         }
     }

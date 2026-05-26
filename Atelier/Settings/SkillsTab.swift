@@ -20,6 +20,11 @@ struct SkillsTab: View {
                     .font(AtelierFont.caption)
                     .foregroundStyle(Palette.error)
             }
+            if bundles.isEmpty && error == nil {
+                Text("No bundled skills found in the app Resources.")
+                    .font(AtelierFont.caption)
+                    .foregroundStyle(Color.atelierInkSecondary)
+            }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
@@ -34,15 +39,7 @@ struct SkillsTab: View {
     }
 
     private var sectionHeader: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Bundled Skills")
-                .font(.system(.title3, design: .serif).weight(.semibold))
-                .foregroundStyle(Color.atelierInk)
-            Text("Copied into `<worktree>/.claude/skills/` at every spawn. Claude auto-discovers them and decides when to apply each based on its frontmatter description. Universal skills load for every project; profile-specific ones only when the project's profile matches.")
-                .font(AtelierFont.caption)
-                .foregroundStyle(Color.atelierInkSecondary)
-                .lineSpacing(2)
-        }
+        SectionHeader("Bundled Skills", subtitle: "Copied into `<worktree>/.claude/skills/` at every spawn. Claude auto-discovers them and decides when to apply each based on its frontmatter description. Universal skills load for every project; profile-specific ones only when the project's profile matches.")
     }
 
     private func bundleSection(_ bundle: SkillBundle) -> some View {
