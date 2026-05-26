@@ -729,6 +729,7 @@ private struct AutopilotControl: View {
 
     @State private var showConfig = false
     @State private var confirmDismiss = false
+    @State private var showSummary = false
 
     var body: some View {
         if let run {
@@ -808,6 +809,12 @@ private struct AutopilotControl: View {
                 .foregroundStyle(Palette.success)
                 .lineLimit(1)
                 .help(branch.isEmpty ? "Autopilot finished." : "Built onto \(branch). Review it, then merge into your branch.")
+            Button { showSummary.toggle() } label: {
+                Image(systemName: "list.bullet.rectangle").font(.system(size: 10))
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showSummary, arrowEdge: .bottom) { summaryPopover(run) }
+            .help("Run summary — merged / blocked / cost")
             if !branch.isEmpty {
                 Menu {
                     Button("Copy branch name") { copyToPasteboard(branch) }
@@ -833,6 +840,64 @@ private struct AutopilotControl: View {
     private func copyToPasteboard(_ s: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(s, forType: .string)
+    }
+
+    private func runSummary(_ run: AutopilotRun) -> (done: Int, blocked: [(id: String, reason: String)]) {
+        var done = 0
+        var blocked: [(id: String, reason: String)] = []
+        for (taskId, phase) in run.taskPhases.sorted(by: { $0.key < $1.key }) {
+            switch phase {
+            case .done: done += 1
+            case .blocked(let reason): blocked.append((taskId, reason))
+            default: break
+            }
+        }
+        return (done, blocked)
+    }
+
+    private func summaryPopover(_ run: AutopilotRun) -> some View {
+        let s = runSummary(run)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Autopilot run").font(AtelierFont.subtitle).foregroundStyle(Color.atelierInk)
+            HStack(spacing: 10) {
+                Label("\(s.done) merged", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(Palette.success)
+                if !s.blocked.isEmpty {
+                    Label("\(s.blocked.count) blocked", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Palette.error)
+                }
+                Spacer()
+                if run.totalCostUsd > 0 {
+                    Text(String(format: "$%.2f", run.totalCostUsd))
+                        .font(AtelierFont.captionMono.weight(.semibold))
+                        .foregroundStyle(Color.atelierAccent)
+                }
+            }
+            .font(AtelierFont.caption)
+            if !run.integrationBranch.isEmpty {
+                Text(run.integrationBranch)
+                    .font(AtelierFont.captionMono)
+                    .foregroundStyle(Color.atelierInkSecondary)
+                    .textSelection(.enabled)
+            }
+            if !s.blocked.isEmpty {
+                AtelierDivider()
+                SectionLabel("BLOCKED")
+                ForEach(s.blocked, id: \.id) { item in
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(item.id)
+                            .font(AtelierFont.captionMono.weight(.semibold))
+                            .foregroundStyle(Color.atelierInk)
+                        Text(item.reason)
+                            .font(AtelierFont.caption)
+                            .foregroundStyle(Color.atelierInkSecondary)
+                            .lineLimit(3)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 320)
     }
 
     private var startButton: some View {
@@ -870,11 +935,16 @@ private struct AutopilotControl: View {
                 Text(String(format: "$%.2f", run.totalCostUsd))
                     .font(AtelierFont.captionMono.weight(.semibold)).foregroundStyle(Color.atelierAccent)
             }
-            Button { onStop(false) } label: {
+            Menu {
+                Button("Force stop — kill running workers now", role: .destructive) { onStop(true) }
+            } label: {
                 Text("Stop").font(AtelierFont.caption.weight(.medium))
+            } primaryAction: {
+                onStop(false)
             }
-            .buttonStyle(.bordered).controlSize(.small)
-            .help("Soft stop — no new spawns; in-flight workers finish.")
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Stop: no new spawns, in-flight workers finish. Use the ⌄ menu to force-stop (kill running workers now).")
         }
         .padding(.horizontal, 10).padding(.vertical, 4)
         .background(Color.atelierAccentSoft.opacity(0.4), in: Capsule())
