@@ -27,6 +27,7 @@ struct ReviewSection: View {
     @State private var conversationMode: ConversationMode = .readable
     @State private var review = ReviewSession()
     @State private var persistedReview: String?
+    @State private var runDuration: TimeInterval?
     @State private var merging: Bool = false
     @State private var mergeError: String?
     @State private var presentingProtectedMerge = false
@@ -79,13 +80,16 @@ struct ReviewSection: View {
             loadPersistedReview()
             await refreshDiff()
             await loadDiskTranscript()
+            await loadRunDuration()
         }
         .onChange(of: task.id) { _, _ in
             persistedReview = nil
+            runDuration = nil
             loadPersistedReview()
             Task {
                 await refreshDiff()
                 await loadDiskTranscript()
+                await loadRunDuration()
             }
         }
         .sheet(item: $preview) { item in
@@ -138,6 +142,14 @@ struct ReviewSection: View {
                 Text(task.status == .done ? "· merged & removed" : "· worktree removed")
                     .font(AtelierFont.captionMono)
                     .foregroundStyle(task.status == .done ? Palette.success.opacity(0.9) : Color.atelierInkSecondary)
+            }
+            if let runDuration {
+                HStack(spacing: 3) {
+                    Image(systemName: "clock").font(.system(size: 9))
+                    Text(formatDuration(runDuration)).font(AtelierFont.captionMono)
+                }
+                .foregroundStyle(Color.atelierInkSecondary)
+                .help("Total worker execution time for this task.")
             }
             Spacer()
             if let verdict = parsedVerdict {
@@ -814,6 +826,26 @@ struct ReviewSection: View {
             self.diskMessages = messages
             self.diskEventsLoaded = true
         }
+    }
+
+    /// Total worker execution time for this task — sums each agent run's
+    /// startedAt→endedAt (covers re-runs / autopilot fix passes), so it reflects
+    /// real work, not idle time between sessions.
+    private func loadRunDuration() async {
+        let agents = (try? await store.agentsForTask(task.id)) ?? []
+        let total = agents.reduce(0.0) { acc, a in
+            guard let s = a.startedAt, let e = a.endedAt, e > s else { return acc }
+            return acc + e.timeIntervalSince(s)
+        }
+        await MainActor.run { runDuration = total > 0 ? total : nil }
+    }
+
+    private func formatDuration(_ secs: TimeInterval) -> String {
+        let total = Int(secs.rounded())
+        if total < 60 { return "\(total)s" }
+        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
+        if h > 0 { return m == 0 ? "\(h)h" : "\(h)h\(m)m" }
+        return s == 0 ? "\(m)m" : "\(m)m\(s)s"
     }
 
     private func refreshDiff() async {
