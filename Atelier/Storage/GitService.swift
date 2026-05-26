@@ -240,6 +240,41 @@ enum GitService {
         return files
     }
 
+    /// Combined diff of everything `branch` added since it diverged from `base`
+    /// (`git diff base...branch`). Used for an autopilot run's whole-branch view —
+    /// the tasks are already merged into the integration branch, so no worktree scan.
+    static func runDiff(projectPath: String, base: String, branch: String) async throws -> (stat: DiffStat, files: [ChangedFile]) {
+        let range = "\(base)...\(branch)"
+        let statResult = try await runGit(args: ["diff", "--shortstat", range], workingDirectory: projectPath)
+        guard statResult.success else {
+            throw Error.commandFailed("git diff --shortstat", stderr: statResult.stderr)
+        }
+        let stat = parseShortStat(statResult.stdout)
+
+        let nameResult = try await runGit(args: ["diff", "--name-status", range], workingDirectory: projectPath)
+        guard nameResult.success else {
+            throw Error.commandFailed("git diff --name-status", stderr: nameResult.stderr)
+        }
+        var files: [ChangedFile] = []
+        for line in nameResult.stdout.split(separator: "\n") {
+            let parts = line.split(separator: "\t", omittingEmptySubsequences: true)
+            guard parts.count >= 2 else { continue }
+            let code = String(parts[0])
+            let path = String(parts[parts.count - 1])
+            let status: ChangeStatus = {
+                switch code.first {
+                case "A": return .added
+                case "M": return .modified
+                case "D": return .deleted
+                case "R": return .renamed
+                default:  return .other(code)
+                }
+            }()
+            files.append(ChangedFile(path: path, status: status))
+        }
+        return (stat, files)
+    }
+
     /// Reads the file content from the worktree on disk.
     static func readWorktreeFile(projectPath: String, taskId: String, relativePath: String) -> Data? {
         let url = URL(fileURLWithPath: projectPath)

@@ -349,6 +349,8 @@ private struct KanbanColumn: View {
     @Binding var selectedTaskID: String?
     @State private var isDropTargeted = false
     @State private var createError: String?
+    @State private var runRecords: [AutopilotRunRecord] = []
+    @State private var openRun: AutopilotRunRecord?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -371,6 +373,12 @@ private struct KanbanColumn: View {
             }
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 8) {
+                    if status == .done {
+                        // Autopilot runs grouped as one entity (integration branch + tasks).
+                        ForEach(runRecords) { rec in
+                            AutopilotRunCard(record: rec) { openRun = rec }
+                        }
+                    }
                     if status == .toDo && executionWaves().count > 1 {
                         // Keep the decomposer's round/batch structure visible: group
                         // To Do by execution wave (derived live from dependsOn + done
@@ -405,6 +413,24 @@ private struct KanbanColumn: View {
             }
             return moved
         } isTargeted: { isDropTargeted = $0 }
+        .task(id: status) { reloadRuns() }
+        .onChange(of: featureRunner.run(for: project.id)?.status) { _, _ in reloadRuns() }
+        .sheet(item: $openRun) { rec in
+            AutopilotRunDetailView(
+                record: rec,
+                project: project,
+                autopilotActive: featureRunner.isActive(projectId: project.id),
+                onClose: { openRun = nil },
+                onChanged: { reloadRuns() }
+            )
+        }
+    }
+
+    /// Loads this project's persisted autopilot run records (Done column only).
+    private func reloadRuns() {
+        guard status == .done else { return }
+        runRecords = AutopilotRunStore.load(projectPath: project.path)
+            .filter { $0.projectId == project.id }
     }
 
     @ViewBuilder
