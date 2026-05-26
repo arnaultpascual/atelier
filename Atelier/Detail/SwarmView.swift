@@ -201,10 +201,19 @@ private struct SwarmCard: View {
                         .foregroundStyle(Color.atelierInkSecondary)
                     Spacer()
                     if let started = run.agent.startedAt {
-                        Label(elapsed(since: started, until: run.agent.endedAt),
-                              systemImage: "clock")
-                            .font(AtelierFont.captionMono)
-                            .foregroundStyle(Color.atelierInkSecondary)
+                        if run.agent.endedAt == nil {
+                            // Live: re-render every second so the elapsed time ticks
+                            // instead of only updating when other state changes.
+                            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                                Label(elapsed(since: started, until: nil), systemImage: "clock")
+                                    .font(AtelierFont.captionMono)
+                                    .foregroundStyle(Color.atelierInkSecondary)
+                            }
+                        } else {
+                            Label(elapsed(since: started, until: run.agent.endedAt), systemImage: "clock")
+                                .font(AtelierFont.captionMono)
+                                .foregroundStyle(Color.atelierInkSecondary)
+                        }
                     }
                     Text(String(format: "$%.4f", run.state.totalCostUsd))
                         .font(AtelierFont.captionMono.weight(.semibold))

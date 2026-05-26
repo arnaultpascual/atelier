@@ -706,16 +706,6 @@ enum AIAssistant {
                                 maxTurns: Int,
                                 apiKey: String?,
                                 repoPath: String? = nil) async throws -> String {
-        guard let claudePath = ClaudeLocator.locate() else { throw Error.claudeNotFound }
-
-        var envOverrides: [Environment.Key: String?] = [:]
-        if let key = apiKey, !key.isEmpty {
-            envOverrides["ANTHROPIC_API_KEY"] = key
-        }
-        let environment: Environment = .inherit.updating(envOverrides)
-
-        // With a repoPath the model is allowed to inspect the repo (Glob/Grep/Read)
-        // and runs in that directory; otherwise it's a pure text turn in a temp dir.
         var arguments: [String] = [
             "-p",
             "--model", model,
@@ -725,7 +715,60 @@ enum AIAssistant {
         ]
         if let repoPath { arguments += ["--add-dir", repoPath] }
         arguments += ["--", prompt]
-        let workDir = repoPath ?? NSTemporaryDirectory()
+        let raw = try await runClaudeStdout(arguments: arguments,
+                                            apiKey: apiKey,
+                                            workingDirectory: repoPath ?? NSTemporaryDirectory())
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { throw Error.empty }
+        return trimmed
+    }
+
+    /// Like `askJSON` but uses `--output-format json` so we can read the run's
+    /// `total_cost_usd` back out — used for autopilot review / conflict spend, which
+    /// otherwise wouldn't be metered into the run total. Returns the model's text
+    /// (the envelope's `result`) plus the cost.
+    private static func askJSONWithCost(prompt: String,
+                                        model: String,
+                                        maxTurns: Int,
+                                        apiKey: String?,
+                                        repoPath: String? = nil) async throws -> (text: String, costUsd: Double) {
+        var arguments: [String] = [
+            "-p",
+            "--model", model,
+            "--permission-mode", "bypassPermissions",
+            "--output-format", "json",
+            "--max-turns", String(maxTurns)
+        ]
+        if let repoPath { arguments += ["--add-dir", repoPath] }
+        arguments += ["--", prompt]
+        let raw = try await runClaudeStdout(arguments: arguments,
+                                            apiKey: apiKey,
+                                            workingDirectory: repoPath ?? NSTemporaryDirectory())
+        // The CLI wraps the model output: { "result": "...", "total_cost_usd": 0.12, ... }
+        guard let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { throw Error.empty }
+            return (trimmed, 0)   // not JSON envelope — hand back raw, no cost
+        }
+        let text = ((obj["result"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let cost = (obj["total_cost_usd"] as? Double) ?? (obj["cost_usd"] as? Double) ?? 0
+        if text.isEmpty { throw Error.empty }
+        return (text, cost)
+    }
+
+    /// Shared subprocess runner for the `-p` text/json helpers: spawns `claude`,
+    /// streams stdout/stderr into a collector, and returns the collected stdout.
+    private static func runClaudeStdout(arguments: [String],
+                                        apiKey: String?,
+                                        workingDirectory: String) async throws -> String {
+        guard let claudePath = ClaudeLocator.locate() else { throw Error.claudeNotFound }
+
+        var envOverrides: [Environment.Key: String?] = [:]
+        if let key = apiKey, !key.isEmpty {
+            envOverrides["ANTHROPIC_API_KEY"] = key
+        }
+        let environment: Environment = .inherit.updating(envOverrides)
 
         let collector = OutputCollector()
         do {
@@ -733,7 +776,7 @@ enum AIAssistant {
                 .path(FilePath(claudePath)),
                 arguments: Arguments(arguments),
                 environment: environment,
-                workingDirectory: FilePath(workDir),
+                workingDirectory: FilePath(workingDirectory),
                 body: { execution, inputWriter, stdout, stderr in
                     try await inputWriter.finish()
                     try await withThrowingTaskGroup(of: Void.self) { group in
@@ -768,10 +811,7 @@ enum AIAssistant {
             throw Error.spawnFailed(underlying: error)
         }
 
-        let raw = await collector.stdout
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { throw Error.empty }
-        return trimmed
+        return await collector.stdout
     }
 
     /// stream-json variant of `askJSON`, used when the user attached images.
@@ -1017,12 +1057,14 @@ enum AIAssistant {
         Use [] for findings when the change is clean. Quote REAL file paths/lines from the diff. Be
         strict about critical/major (those get auto-fixed); be lenient about minor/cosmetic.
         """
-        let raw = try await askJSON(prompt: prompt,
-                                    model: "claude-opus-4-7",
-                                    maxTurns: 25,
-                                    apiKey: apiKey,
-                                    repoPath: worktreePath)
-        return try parseReviewReport(raw)
+        let (raw, cost) = try await askJSONWithCost(prompt: prompt,
+                                                    model: "claude-opus-4-7",
+                                                    maxTurns: 25,
+                                                    apiKey: apiKey,
+                                                    repoPath: worktreePath)
+        var report = try parseReviewReport(raw)
+        report.costUsd = cost
+        return report
     }
 
     private static func parseReviewReport(_ raw: String) throws -> ReviewReport {
@@ -1063,7 +1105,7 @@ enum AIAssistant {
                                      branch: String,
                                      conflictFiles: [String],
                                      taskTitle: String,
-                                     apiKey: String? = nil) async throws -> Bool {
+                                     apiKey: String? = nil) async throws -> (resolved: Bool, costUsd: Double) {
         let files = conflictFiles.map { "- \($0)" }.joined(separator: "\n")
         let prompt = """
         A `git merge` is IN PROGRESS in the current directory and hit conflicts. Finish it.
@@ -1084,14 +1126,14 @@ enum AIAssistant {
         list above. When done there must be no remaining conflict markers and no MERGE_HEAD.
         """
         // We don't care about the model's text — the git state is the source of truth.
-        _ = try? await askJSON(prompt: prompt,
-                               model: "claude-opus-4-7",
-                               maxTurns: 30,
-                               apiKey: apiKey,
-                               repoPath: projectPath)
+        let cost = (try? await askJSONWithCost(prompt: prompt,
+                                               model: "claude-opus-4-7",
+                                               maxTurns: 30,
+                                               apiKey: apiKey,
+                                               repoPath: projectPath))?.costUsd ?? 0
         let unmerged = try await GitService.unmergedFiles(projectPath: projectPath)
         let stillMerging = try await GitService.isMergeInProgress(projectPath: projectPath)
-        return unmerged.isEmpty && !stillMerging
+        return (unmerged.isEmpty && !stillMerging, cost)
     }
 
     // MARK: - Internals

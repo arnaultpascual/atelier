@@ -55,6 +55,9 @@ struct ReviewReport: Sendable {
     let summary: String
     let findings: [ReviewFinding]
     let rawMarkdown: String?
+    /// USD spent producing this review (Opus call), so the autopilot can fold it
+    /// into the run total. 0 when unknown.
+    var costUsd: Double = 0
 
     var blockingFindings: [ReviewFinding] { findings.filter { $0.severity.isBlocking } }
     var isClean: Bool { blockingFindings.isEmpty }

@@ -37,8 +37,8 @@ final class AutopilotRun {
     @ObservationIgnored var loopTask: Task<Void, Never>?
     @ObservationIgnored fileprivate var deps: FeatureBuildRunner.Deps?
 
-    /// Sum of every worker chain's cumulative cost (build + fix passes). Review/conflict spend
-    /// goes through `claude` too and shows in the Usage dashboard, but isn't metered live here.
+    /// Sum of every task's cumulative cost: build + fix passes (worker chains) plus the
+    /// Opus review and any conflict-resolution spend, all folded into `costByTask`.
     var totalCostUsd: Double { costByTask.values.reduce(0, +) }
 
     init(projectId: String, batchesRequested: Int, budgetCapUsd: Double?) {
@@ -250,6 +250,7 @@ final class FeatureBuildRunner {
                                                           apiKey: deps.apiKey)
             run.findingsByTask[task.id] = report.findings
             run.reportByTask[task.id] = report   // the initial review = what was found pre-fix
+            run.costByTask[task.id, default: 0] += report.costUsd
         } catch {
             await block(task, "review failed: \(error.localizedDescription)", run: run, deps: deps); return
         }
@@ -284,6 +285,7 @@ final class FeatureBuildRunner {
                                                               baseBranch: run.baseBranch,
                                                               apiKey: deps.apiKey)
                 run.findingsByTask[task.id] = report.findings
+                run.costByTask[task.id, default: 0] += report.costUsd
             } catch {
                 await block(task, "re-review failed: \(error.localizedDescription)", run: run, deps: deps); return
             }
@@ -309,12 +311,13 @@ final class FeatureBuildRunner {
                                  outcome: pass > 0 ? "Merged after \(pass) fix pass\(pass == 1 ? "" : "es")" : "Merged cleanly")
             case .conflict(let files):
                 run.taskPhases[task.id] = .resolvingConflict
-                let resolved = try await AIAssistant.resolveMergeConflict(projectPath: deps.project.path,
+                let (resolved, conflictCost) = try await AIAssistant.resolveMergeConflict(projectPath: deps.project.path,
                                                                           baseBranch: run.baseBranch,
                                                                           branch: branch,
                                                                           conflictFiles: files,
                                                                           taskTitle: task.title,
                                                                           apiKey: deps.apiKey)
+                run.costByTask[task.id, default: 0] += conflictCost
                 if resolved {
                     await markMerged(task, run: run, deps: deps, outcome: "Merged after auto-resolving merge conflicts")
                 } else {
