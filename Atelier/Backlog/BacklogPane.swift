@@ -15,6 +15,7 @@ struct BacklogPane: View {
     @State private var settingsProject: Project?
     @State private var settingsToPermissions = false
     @State private var fillKanbanProject: Project?
+    @State private var planBatchProject: Project?
 
     var body: some View {
         ZStack {
@@ -31,6 +32,15 @@ struct BacklogPane: View {
             FillKanbanSheet(store: store,
                             project: p,
                             onClose: { fillKanbanProject = nil })
+        }
+        .sheet(item: $planBatchProject) { p in
+            PlanBatchView(store: store,
+                          spawner: spawner,
+                          server: server,
+                          approvalQueue: approvalQueue,
+                          featureRunner: featureRunner,
+                          project: p,
+                          onClose: { planBatchProject = nil })
         }
     }
 
@@ -55,7 +65,8 @@ struct BacklogPane: View {
                               onClearAutopilot: { featureRunner.clearRun(projectId: project.id) },
                               onRefresh: { Task { _ = try? await store.importTasksFromDisk(project: project) } },
                               onSettings: { settingsToPermissions = false; settingsProject = project },
-                              onFillKanban: { fillKanbanProject = project })
+                              onFillKanban: { fillKanbanProject = project },
+                              onPlanBatch: { planBatchProject = project })
                 KanbanBoard(store: store,
                             spawner: spawner,
                             server: server,
@@ -122,6 +133,7 @@ private struct ProjectHeader: View {
     let onRefresh: () -> Void
     let onSettings: () -> Void
     let onFillKanban: () -> Void
+    let onPlanBatch: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -159,6 +171,21 @@ private struct ProjectHeader: View {
                                  onResume: onResumeAutopilot,
                                  onOpenApprovalSettings: onOpenApprovalSettings,
                                  onClear: onClearAutopilot)
+                Button(action: onPlanBatch) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "rectangle.3.group")
+                            .font(.system(size: 10))
+                        Text("Plan")
+                            .font(AtelierFont.caption.weight(.medium))
+                    }
+                    .foregroundStyle(Color.atelierInkSecondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.atelierSurface, in: Capsule())
+                    .overlay(Capsule().stroke(Color.atelierDivider, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Organize tasks into autopilot rounds and launch — drag tasks between rounds to set dependencies.")
                 Button(action: onFillKanban) {
                     HStack(spacing: 4) {
                         Image(systemName: "wand.and.stars")
