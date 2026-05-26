@@ -485,18 +485,22 @@ struct TaskDetailView: View {
     /// Pick which other tasks must finish before this one — this is what assigns a task to a
     /// later batch/round. No dependencies → it runs in round 1.
     private var dependsOnEditor: some View {
-        let others = (selectedProject.map { store.tasks(in: $0.id) } ?? []).filter { $0.id != task.id }
+        let all = selectedProject.map { store.tasks(in: $0.id) } ?? []
+        let others = all.filter { $0.id != task.id }
+        let roundOf = dependencyRoundMap(all: all)
+        let cycles = editingDependsOn.intersection(dependentsClosure(of: task.id, in: all))
         return VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline) {
-                Text("DEPENDS ON")
-                    .font(AtelierFont.eyebrow)
-                    .foregroundStyle(Color.atelierInkSecondary)
+                SectionLabel("DEPENDS ON")
                 Spacer()
                 if !editingDependsOn.isEmpty {
                     Text("\(editingDependsOn.count) selected")
                         .font(AtelierFont.eyebrow)
                         .foregroundStyle(Color.atelierInkSecondary.opacity(0.8))
                 }
+            }
+            if !cycles.isEmpty {
+                CalloutBanner(.danger, "Cycle: \(cycles.sorted().joined(separator: ", ")) already wait on this task. Uncheck to keep the graph runnable.")
             }
             if others.isEmpty {
                 Text("No other tasks yet — add more, then pick which must finish first.")
@@ -511,6 +515,14 @@ struct TaskDetailView: View {
                                     Text(other.id)
                                         .font(AtelierFont.eyebrow)
                                         .foregroundStyle(Color.atelierInkSecondary)
+                                    if let r = roundOf[other.id] {
+                                        Text("R\(r)")
+                                            .font(AtelierFont.eyebrow)
+                                            .foregroundStyle(Color.atelierInkSecondary.opacity(0.7))
+                                            .padding(.horizontal, 4).padding(.vertical, 1)
+                                            .background(Color.atelierSurface, in: Capsule())
+                                            .overlay(Capsule().stroke(Color.atelierDivider, lineWidth: 1))
+                                    }
                                     Text(other.title)
                                         .font(AtelierFont.caption)
                                         .foregroundStyle(Color.atelierInk)
@@ -528,6 +540,29 @@ struct TaskDetailView: View {
                     .foregroundStyle(Color.atelierInkSecondary)
             }
         }
+    }
+
+    /// Round (execution wave) of each To-Do task, so the checklist can show where a dependency lands.
+    private func dependencyRoundMap(all: [AtelierTask]) -> [String: Int] {
+        let todo = all.filter { $0.status == .toDo }
+        var m: [String: Int] = [:]
+        for w in ExecutionPlanner.waves(tasks: todo, allTasks: all) {
+            for t in w.tasks { m[t.id] = w.round }
+        }
+        return m
+    }
+
+    /// Tasks that (transitively) depend on `id` — selecting any of these as a dependency would
+    /// form a cycle.
+    private func dependentsClosure(of id: String, in all: [AtelierTask]) -> Set<String> {
+        var result: Set<String> = []
+        var frontier = [id]
+        while let cur = frontier.popLast() {
+            for t in all where t.dependsOn.contains(cur) && !result.contains(t.id) {
+                result.insert(t.id); frontier.append(t.id)
+            }
+        }
+        return result
     }
 
     private func dependencyBinding(_ id: String) -> Binding<Bool> {
