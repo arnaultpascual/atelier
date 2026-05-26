@@ -117,38 +117,44 @@ struct TaskDetailView: View {
 
     private var editableBody: some View {
         VStack(spacing: 0) {
-            metadata
-                .padding(.horizontal, 36)
-                .padding(.vertical, 14)
-                .overlay(alignment: .bottom) {
-                    AtelierDivider()
-                }
-
-            if (taskUsage?.runs ?? 0) > 0 {
-                taskCostStrip
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 36)
-                    .padding(.vertical, 12)
-                    .overlay(alignment: .bottom) {
-                        AtelierDivider()
+            HStack(alignment: .top, spacing: 0) {
+                // Left rail — how the task runs, what it waits on, what it has cost.
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        metadata
+                        if (taskUsage?.runs ?? 0) > 0 {
+                            taskCostStrip
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
-            }
-
-            autopilotReportSection
-
-            AttachmentsSection(store: store, task: task)
-                .padding(.horizontal, 36)
-                .padding(.vertical, 14)
-                .overlay(alignment: .bottom) {
-                    AtelierDivider()
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(width: 320)
 
-            descriptionEditor
-                .padding(.horizontal, 36)
-                .padding(.vertical, 14)
+                Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(width: 1)
+
+                // Main column — attachments, optional autopilot review, then the prompt editor (fills).
+                VStack(alignment: .leading, spacing: 0) {
+                    AttachmentsSection(store: store, task: task)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 14)
+                        .overlay(alignment: .bottom) { AtelierDivider() }
+
+                    autopilotReportSection
+
+                    descriptionEditor
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 16)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             footer
-                .padding(.horizontal, 36)
+                .padding(.horizontal, 24)
                 .padding(.vertical, 12)
                 .overlay(alignment: .top) {
                     AtelierDivider()
@@ -162,6 +168,9 @@ struct TaskDetailView: View {
     private var lockedReviewBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
+                CalloutBanner(.warning, "Locked while in Review — move the task back to To Do to edit the brief.")
+                    .padding(.horizontal, 36)
+                    .padding(.top, 14)
                 if let project = selectedProject {
                     ReviewSection(store: store,
                                   spawner: spawner,
@@ -771,7 +780,7 @@ struct TaskDetailView: View {
         Button(action: spawnWorker) {
             HStack(spacing: 5) {
                 Image(systemName: "play.fill").font(.system(size: 10))
-                Text("Spawn")
+                Text(dirty ? "Save to Spawn" : "Spawn")
                     .font(.system(.callout).weight(.semibold))
             }
             .padding(.horizontal, 14)
