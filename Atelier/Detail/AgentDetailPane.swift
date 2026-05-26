@@ -168,7 +168,9 @@ struct TaskDetailView: View {
     private var lockedReviewBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                CalloutBanner(.warning, "Locked while in Review — move the task back to To Do to edit the brief.")
+                CalloutBanner(.warning, task.status == .done
+                    ? "This task is Done — move it back to To Do to edit the brief and re-run."
+                    : "Locked while in Review — move the task back to To Do to edit the brief.")
                     .padding(.horizontal, 36)
                     .padding(.top, 14)
                 if let project = selectedProject {

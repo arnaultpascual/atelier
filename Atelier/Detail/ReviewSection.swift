@@ -108,11 +108,11 @@ struct ReviewSection: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: "magnifyingglass.circle.fill")
-                .foregroundStyle(Color.atelierAccent)
-            Text("In review")
+            Image(systemName: task.status == .done ? "checkmark.seal.fill" : "magnifyingglass.circle.fill")
+                .foregroundStyle(task.status == .done ? Palette.success : Color.atelierAccent)
+            Text(task.status == .done ? "Done" : "In review")
                 .font(AtelierFont.eyebrow)
-                .foregroundStyle(Color.atelierAccent)
+                .foregroundStyle(task.status == .done ? Palette.success : Color.atelierAccent)
             Text(branch)
                 .font(AtelierFont.captionMono.weight(.semibold))
                 .foregroundStyle(Color.atelierInk)
