@@ -34,6 +34,7 @@ final class AutopilotRun {
     var budgetCapUsd: Double?
     var baseBranch: String = ""
     var integrationBranch: String = ""
+    var originalBase: String = ""    // the branch the integration was cut from (for the combined diff / final merge)
     var lastError: String?
     let startedAt = Date()
 
@@ -157,6 +158,7 @@ final class FeatureBuildRunner {
                 let integration = "atelier/autopilot-\(Self.timestamp())"
                 try await GitService.createIntegrationBranch(projectPath: deps.project.path, branch: integration)
                 run.integrationBranch = integration
+                run.originalBase = base        // remember where we branched from
                 run.baseBranch = integration   // task worktrees branch off this; merges land here
             } else {
                 // Resume (e.g. after a usage-limit pause): the feature branch already exists.
@@ -427,6 +429,34 @@ final class FeatureBuildRunner {
     private func finish(_ run: AutopilotRun, _ status: Status) {
         run.status = status
         if case .failed(let msg) = status { run.lastError = msg }
+        persistRunRecord(run)
+    }
+
+    /// Persists the run as a grouped record (integration branch + its tasks) so the
+    /// Done column can show it as one entity with a combined diff + iterate/merge.
+    private func persistRunRecord(_ run: AutopilotRun) {
+        guard !run.integrationBranch.isEmpty, let deps = run.deps else { return }
+        let tasks: [AutopilotRunRecord.TaskOutcome] = run.taskPhases.keys.compactMap { id in
+            guard let t = deps.store.taskByID(id) else { return nil }
+            let status: AutopilotRunRecord.TaskOutcome.Status
+            var reason: String?
+            switch run.taskPhases[id] {
+            case .done:               status = .merged
+            case .blocked(let r):     status = .blocked; reason = r
+            default:                  status = .incomplete
+            }
+            return .init(id: id, title: t.title, status: status, reason: reason)
+        }.sorted { $0.id < $1.id }
+        guard !tasks.isEmpty else { return }
+        let record = AutopilotRunRecord(id: run.integrationBranch,
+                                        projectId: run.projectId,
+                                        integrationBranch: run.integrationBranch,
+                                        baseBranch: run.originalBase,
+                                        startedAt: run.startedAt,
+                                        finishedAt: Date(),
+                                        totalCostUsd: run.totalCostUsd,
+                                        tasks: tasks)
+        AutopilotRunStore.append(record, projectPath: deps.project.path)
     }
 
     // MARK: - Usage-limit handling
