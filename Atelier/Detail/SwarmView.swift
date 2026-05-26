@@ -9,6 +9,7 @@ struct SwarmView: View {
     @Bindable var spawner: TaskSpawner
     @Bindable var server: ApprovalServer
     @Bindable var approvalQueue: ApprovalQueue
+    @Bindable var featureRunner: FeatureBuildRunner
     let onPick: (_ projectId: String, _ taskId: String) -> Void
 
     private let columns: [GridItem] = [GridItem(.adaptive(minimum: 280, maximum: 420), spacing: 14)]
@@ -19,7 +20,7 @@ struct SwarmView: View {
             VStack(alignment: .leading, spacing: 0) {
                 trafficLightReserve
                 header
-                if liveRuns.isEmpty {
+                if liveRuns.isEmpty && reviewRuns.isEmpty {
                     emptyState
                 } else {
                     grid
@@ -38,7 +39,7 @@ struct SwarmView: View {
                 Text("Swarm")
                     .font(AtelierFont.title)
                     .foregroundStyle(Color.atelierInk)
-                Text("\(liveRuns.count) worker\(liveRuns.count == 1 ? "" : "s")")
+                Text("\(workerCount) worker\(workerCount == 1 ? "" : "s")")
                     .font(AtelierFont.eyebrow)
                     .foregroundStyle(Color.atelierInkSecondary)
                 if totalCost > 0 {
@@ -62,6 +63,12 @@ struct SwarmView: View {
     private var grid: some View {
         ScrollView {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
+                // Autopilot review/conflict phases first — these aren't spawner runs,
+                // so they'd otherwise be invisible while the round is being integrated.
+                ForEach(reviewRuns) { entry in
+                    AutopilotReviewCard(entry: entry,
+                                        onTap: { onPick(entry.project.id, entry.taskId) })
+                }
                 ForEach(liveRuns, id: \.taskId) { entry in
                     SwarmCard(
                         run: entry.run,
@@ -141,6 +148,42 @@ struct SwarmView: View {
 
     private var totalCost: Double {
         liveRuns.reduce(0) { $0 + $1.run.state.totalCostUsd }
+            + reviewRuns.reduce(0) { $0 + $1.costSoFar }
+    }
+
+    private var workerCount: Int { liveRuns.count + reviewRuns.count }
+
+    // MARK: Autopilot review/conflict phases (not spawner runs)
+
+    struct ReviewEntry: Identifiable {
+        let taskId: String
+        let task: AtelierTask
+        let project: Project
+        let phase: TaskPhase
+        let costSoFar: Double
+        var id: String { taskId }
+    }
+
+    /// Autopilot tasks currently being reviewed or having a conflict resolved by Opus.
+    /// These go through `claude` one-shot (not TaskSpawner), so they don't appear in
+    /// `liveRuns`. The build/fix phases already show as spawner runs, so we skip them.
+    private var reviewRuns: [ReviewEntry] {
+        var out: [ReviewEntry] = []
+        for run in featureRunner.runs.values {
+            for (taskId, phase) in run.taskPhases {
+                switch phase {
+                case .reviewing, .resolvingConflict:
+                    guard !spawner.hasLiveWorker(for: taskId),
+                          let task = store.taskByID(taskId),
+                          let project = store.projectByID(task.projectId) else { continue }
+                    let cost = (run.costByTask[taskId] ?? 0) + (run.reviewCostByTask[taskId] ?? 0)
+                    out.append(ReviewEntry(taskId: taskId, task: task, project: project, phase: phase, costSoFar: cost))
+                default:
+                    continue
+                }
+            }
+        }
+        return out.sorted { $0.taskId < $1.taskId }
     }
 }
 
@@ -330,5 +373,72 @@ private struct SwarmCard: View {
         if secs < 60 { return "\(secs)s" }
         let m = secs / 60, s = secs % 60
         return s == 0 ? "\(m)m" : "\(m)m\(s)s"
+    }
+}
+
+// MARK: - Autopilot review-phase card
+
+/// A task being reviewed (or having a conflict resolved) by Opus during an
+/// autopilot round. Not backed by a TaskSpawner run, so it gets its own light card.
+private struct AutopilotReviewCard: View {
+    let entry: SwarmView.ReviewEntry
+    let onTap: () -> Void
+    @State private var hover = false
+
+    private var phaseLabel: String {
+        if case .resolvingConflict = entry.phase { return "Resolving conflict" }
+        return "Opus reviewing"
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.seal")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.atelierAccent)
+                    Text(phaseLabel)
+                        .font(AtelierFont.eyebrow)
+                        .foregroundStyle(Color.atelierAccent)
+                    Spacer()
+                    ProgressView().controlSize(.small)
+                }
+                Text(entry.task.title)
+                    .font(AtelierFont.subtitle)
+                    .foregroundStyle(Color.atelierInk)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.atelierInkSecondary)
+                    Text(entry.project.name)
+                        .font(AtelierFont.caption)
+                        .foregroundStyle(Color.atelierInkSecondary)
+                    Text("·").foregroundStyle(Color.atelierInkSecondary)
+                    Text(entry.taskId)
+                        .font(AtelierFont.eyebrow)
+                        .foregroundStyle(Color.atelierInkSecondary)
+                    Spacer()
+                }
+                Divider().background(Color.atelierDivider.opacity(0.5))
+                HStack(spacing: 10) {
+                    Label("Opus 4.7", systemImage: "cpu")
+                        .font(AtelierFont.captionMono)
+                        .foregroundStyle(Color.atelierInkSecondary)
+                    Spacer()
+                    if entry.costSoFar > 0 {
+                        Text(String(format: "$%.4f", entry.costSoFar))
+                            .font(AtelierFont.captionMono.weight(.semibold))
+                            .foregroundStyle(Color.atelierAccent)
+                    }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .atelierCard(border: Color.atelierAccent.opacity(0.4), borderWidth: hover ? 1.5 : 1)
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
     }
 }

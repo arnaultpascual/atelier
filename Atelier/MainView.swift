@@ -109,7 +109,7 @@ struct MainView: View {
     private var centerView: some View {
         switch centerTarget {
         case .swarm:
-            SwarmView(store: store, spawner: spawner, server: server, approvalQueue: approvalQueue) { _, taskId in
+            SwarmView(store: store, spawner: spawner, server: server, approvalQueue: approvalQueue, featureRunner: featureRunner) { _, taskId in
                 // Open the task sheet directly without leaving the Swarm view.
                 // selectedProject is derived from the task's own projectId below
                 // so we don't lose context (or change column targets) on every click.
