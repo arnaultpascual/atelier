@@ -224,8 +224,15 @@ private struct ChatRoomView: View {
     @State private var contextPath: String? = nil
     @State private var capsLoaded: Bool = false
     @State private var isDropTargeted: Bool = false
+    @State private var showCreateTask = false
+    @State private var ctProjectId: String = ""
+    @State private var ctTitle: String = ""
+    @State private var ctDesc: String = ""
 
     private var liveTurn: LiveChatTurn? { spawner.turn(for: room.id) }
+    private var allProjects: [Project] {
+        store.projectsByWorkspace.values.flatMap { $0 }.sorted { $0.name < $1.name }
+    }
     private var isWorking: Bool { spawner.isBusy(roomId: room.id) }
 
     var body: some View {
@@ -238,6 +245,85 @@ private struct ChatRoomView: View {
             inputBar
         }
         .task { await loadHistoryIfNeeded() }
+        .sheet(isPresented: $showCreateTask) { createTaskSheet }
+    }
+
+    private func prepareCreateTask() {
+        ctTitle = room.title == "Untitled chat" ? "" : room.title
+        ctDesc = ""
+        if ctProjectId.isEmpty || !allProjects.contains(where: { $0.id == ctProjectId }) {
+            ctProjectId = allProjects.first?.id ?? ""
+        }
+        showCreateTask = true
+    }
+
+    private func createTaskFromChat() {
+        guard let project = allProjects.first(where: { $0.id == ctProjectId }) else { return }
+        let title = ctTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        let desc = ctDesc
+        Task {
+            do {
+                var task = try await store.createTask(in: project, title: title)
+                if !desc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    task.descriptionMd = desc
+                    try await store.updateTask(task)
+                }
+                await MainActor.run { showCreateTask = false }
+            } catch {
+                // best-effort: leave the sheet open so the user can retry
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var createTaskSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Create task from chat")
+                .font(AtelierFont.title)
+                .foregroundStyle(Color.atelierInk)
+            if allProjects.isEmpty {
+                Text("Add a project first — tasks live in a project's backlog.")
+                    .font(AtelierFont.caption)
+                    .foregroundStyle(Color.atelierInkSecondary)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    SectionLabel("PROJECT")
+                    Picker("", selection: $ctProjectId) {
+                        ForEach(allProjects) { p in Text(p.name).tag(p.id) }
+                    }
+                    .labelsHidden().pickerStyle(.menu)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    SectionLabel("TITLE")
+                    TextField("Task title", text: $ctTitle).textFieldStyle(.roundedBorder)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    SectionLabel("DESCRIPTION (optional)")
+                    TextEditor(text: $ctDesc)
+                        .scrollContentBackground(.hidden)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(minHeight: 140)
+                        .padding(8)
+                        .background(Color.atelierSurface, in: RoundedRectangle(cornerRadius: AtelierCorner.control))
+                        .overlay(RoundedRectangle(cornerRadius: AtelierCorner.control).stroke(Color.atelierDivider, lineWidth: 1))
+                    Text("The worker won't see this chat — paste any conclusions you want it to act on.")
+                        .font(AtelierFont.caption)
+                        .foregroundStyle(Color.atelierInkSecondary)
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { showCreateTask = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Create task") { createTaskFromChat() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(ctProjectId.isEmpty || ctTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 520, height: 440)
+        .background(Color.atelierBackground)
     }
 
     private var header: some View {
@@ -283,6 +369,16 @@ private struct ChatRoomView: View {
                 }
             }
             Spacer()
+            Button { prepareCreateTask() } label: {
+                Image(systemName: "plus.rectangle.on.folder")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.atelierInkSecondary)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(allProjects.isEmpty)
+            .help(allProjects.isEmpty ? "Add a project first to create tasks." : "Create a task in a project from this chat")
             viewModeToggle
             modelPicker
             if isWorking {
