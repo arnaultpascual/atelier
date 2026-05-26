@@ -63,7 +63,7 @@ struct BacklogPane: View {
                               onResumeAutopilot: { featureRunner.resume(projectId: project.id) },
                               onOpenApprovalSettings: { settingsToPermissions = true; settingsProject = project },
                               onClearAutopilot: { featureRunner.clearRun(projectId: project.id) },
-                              onRefresh: { Task { _ = try? await store.importTasksFromDisk(project: project) } },
+                              onRefresh: { _ = try? await store.importTasksFromDisk(project: project) },
                               onSettings: { settingsToPermissions = false; settingsProject = project },
                               onFillKanban: { fillKanbanProject = project },
                               onPlanBatch: { planBatchProject = project })
@@ -130,10 +130,11 @@ private struct ProjectHeader: View {
     let onResumeAutopilot: () -> Void
     let onOpenApprovalSettings: () -> Void
     let onClearAutopilot: () -> Void
-    let onRefresh: () -> Void
+    let onRefresh: () async -> Void
     let onSettings: () -> Void
     let onFillKanban: () -> Void
     let onPlanBatch: () -> Void
+    @State private var refreshing = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -210,14 +211,24 @@ private struct ProjectHeader: View {
                 }
                 .buttonStyle(.plain)
                 .help("Project settings — name, profile, default model, monthly budget")
-                Button(action: onRefresh) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.atelierInkSecondary)
-                        .frame(width: 24, height: 24)
-                        .contentShape(Rectangle())
+                Button {
+                    refreshing = true
+                    Task { await onRefresh(); refreshing = false }
+                } label: {
+                    Group {
+                        if refreshing {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Color.atelierInkSecondary)
+                        }
+                    }
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .disabled(refreshing)
                 .help("Re-scan `backlog/tasks/*.md` from disk")
             }
             Text((project.path as NSString).abbreviatingWithTildeInPath)
