@@ -217,15 +217,9 @@ private struct GeneralTab: View {
                     .font(AtelierFont.caption)
                     .foregroundStyle(Color.atelierInkSecondary)
                 if draftAutoApprove.isRisky {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 10))
-                        Text(draftAutoApprove == .all
-                             ? "Agents run Bash and write files unattended. Worktree isolation still applies, but Bash can do anything you can — use only on work you trust."
-                             : "Agents write and edit files unattended (Bash still asks).")
-                    }
-                    .font(AtelierFont.caption)
-                    .foregroundStyle(Palette.warning)
+                    CalloutBanner(.warning, draftAutoApprove == .all
+                        ? "Agents run Bash and write files unattended. Worktree isolation still applies, but Bash can do anything you can — use only on work you trust."
+                        : "Agents write and edit files unattended (Bash still asks).")
                 }
             }
         }
@@ -483,14 +477,7 @@ private struct PermissionsTab: View {
                     .foregroundStyle(Color.atelierInkSecondary)
             }
 
-            HStack(alignment: .top, spacing: 6) {
-                Image(systemName: "infinity").font(.system(size: 10))
-                Text("Autopilot mode auto-accepts every tool call EXCEPT the deny rules here — add deny rules to constrain what unattended agents may do. (The General tab's auto-approve level applies only to manual spawns.)")
-            }
-            .font(AtelierFont.caption)
-            .foregroundStyle(Color.atelierAccent)
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(Color.atelierAccentSoft.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
+            CalloutBanner(.info, "Autopilot mode auto-accepts every tool call EXCEPT the deny rules here — add deny rules to constrain what unattended agents may do. (The General tab's auto-approve level applies only to manual spawns.)", icon: "infinity")
 
             Divider().background(Color.atelierDivider).opacity(0.6)
 

@@ -546,11 +546,7 @@ private struct TaskCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background(Color.atelierBackground.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(borderColor, lineWidth: isSelected ? 1.5 : 1)
-        )
+        .atelierCard(border: borderColor, borderWidth: isSelected ? 1.5 : 1)
         .overlay(alignment: .topTrailing) {
             if canSpawn && hover {
                 spawnButton
@@ -850,11 +846,7 @@ private struct AutopilotConfigPopover: View {
                     .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
                 TextField("optional — e.g. 10.00", text: $budgetText).textFieldStyle(.roundedBorder)
             }
-            HStack(alignment: .top, spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10))
-                Text("Runs unattended: agents build, fix and auto-merge into your current branch, with tool approvals auto-accepted except your explicit deny rules. Run on a branch, not protected main.")
-            }
-            .font(AtelierFont.caption).foregroundStyle(Palette.warning)
+            CalloutBanner(.warning, "Runs unattended: agents build, fix and auto-merge into a fresh atelier/autopilot-* branch (your current branch is untouched, nothing is pushed), with tool approvals auto-accepted except your explicit deny rules.")
             Button("Manage approval rules…") {
                 dismiss()
                 onOpenApprovalSettings()

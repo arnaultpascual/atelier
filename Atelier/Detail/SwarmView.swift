@@ -55,7 +55,7 @@ struct SwarmView: View {
         .padding(.horizontal, 28)
         .padding(.bottom, 18)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+            AtelierDivider()
         }
     }
 
@@ -213,11 +213,7 @@ private struct SwarmCard: View {
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.atelierSurface.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(borderColor, lineWidth: hover ? 1.5 : 1)
-            )
+            .atelierCard(border: borderColor, borderWidth: hover ? 1.5 : 1)
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }

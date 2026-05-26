@@ -57,7 +57,7 @@ struct ApprovalsView: View {
         .padding(.horizontal, 28)
         .padding(.bottom, 18)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+            AtelierDivider()
         }
     }
 

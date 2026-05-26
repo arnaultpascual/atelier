@@ -19,14 +19,14 @@ struct TaskAgentView: View {
                 .padding(.top, 16)
                 .padding(.bottom, 14)
                 .overlay(alignment: .bottom) {
-                    Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                    AtelierDivider()
                 }
 
             worktreeRow
                 .padding(.horizontal, 36)
                 .padding(.vertical, 10)
                 .overlay(alignment: .bottom) {
-                    Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                    AtelierDivider()
                 }
 
             EventTimeline(state: run.state, hint: run.statusHint)
@@ -38,7 +38,7 @@ struct TaskAgentView: View {
                     .padding(.vertical, 10)
                     .background(Color.atelierBackground)
                     .overlay(alignment: .top) {
-                        Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                        AtelierDivider()
                     }
             }
 
@@ -46,7 +46,7 @@ struct TaskAgentView: View {
                 .padding(.horizontal, 36)
                 .padding(.vertical, 12)
                 .overlay(alignment: .top) {
-                    Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                    AtelierDivider()
                 }
                 .background(Color.atelierBackground)
         }

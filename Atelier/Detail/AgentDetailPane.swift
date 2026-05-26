@@ -98,7 +98,7 @@ struct TaskDetailView: View {
                 .padding(.bottom, 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .overlay(alignment: .bottom) {
-                    Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                    AtelierDivider()
                 }
 
             if isLockedForReview {
@@ -121,7 +121,7 @@ struct TaskDetailView: View {
                 .padding(.horizontal, 36)
                 .padding(.vertical, 14)
                 .overlay(alignment: .bottom) {
-                    Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                    AtelierDivider()
                 }
 
             if (taskUsage?.runs ?? 0) > 0 {
@@ -130,7 +130,7 @@ struct TaskDetailView: View {
                     .padding(.horizontal, 36)
                     .padding(.vertical, 12)
                     .overlay(alignment: .bottom) {
-                        Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                        AtelierDivider()
                     }
             }
 
@@ -140,7 +140,7 @@ struct TaskDetailView: View {
                 .padding(.horizontal, 36)
                 .padding(.vertical, 14)
                 .overlay(alignment: .bottom) {
-                    Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                    AtelierDivider()
                 }
 
             descriptionEditor
@@ -151,7 +151,7 @@ struct TaskDetailView: View {
                 .padding(.horizontal, 36)
                 .padding(.vertical, 12)
                 .overlay(alignment: .top) {
-                    Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                    AtelierDivider()
                 }
                 .background(Color.atelierBackground)
         }
@@ -172,7 +172,7 @@ struct TaskDetailView: View {
                         .padding(.horizontal, 36)
                         .padding(.vertical, 14)
                         .overlay(alignment: .bottom) {
-                            Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                            AtelierDivider()
                         }
                 }
 
@@ -182,7 +182,7 @@ struct TaskDetailView: View {
                         .padding(.horizontal, 36)
                         .padding(.vertical, 12)
                         .overlay(alignment: .bottom) {
-                            Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                            AtelierDivider()
                         }
                 }
 
@@ -191,7 +191,7 @@ struct TaskDetailView: View {
                     .padding(.horizontal, 36)
                     .padding(.vertical, 12)
                     .overlay(alignment: .bottom) {
-                        Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                        AtelierDivider()
                     }
 
                 autopilotReportSection
@@ -201,7 +201,7 @@ struct TaskDetailView: View {
                     .padding(.horizontal, 36)
                     .padding(.vertical, 12)
                     .overlay(alignment: .bottom) {
-                        Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                        AtelierDivider()
                     }
 
                 lockedFooter
@@ -305,7 +305,7 @@ struct TaskDetailView: View {
             .padding(.horizontal, 36)
             .padding(.vertical, 12)
             .overlay(alignment: .bottom) {
-                Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(height: 1)
+                AtelierDivider()
             }
         }
     }
@@ -534,9 +534,7 @@ struct TaskDetailView: View {
     @ViewBuilder
     private func metaColumn<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(label)
-                .font(AtelierFont.eyebrow)
-                .foregroundStyle(Color.atelierInkSecondary)
+            SectionLabel(label)
             content()
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
