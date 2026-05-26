@@ -471,6 +471,10 @@ private struct PermissionsTab: View {
 
     @State private var projectRules: [PermissionRule] = []
     @State private var lastError: String?
+    @State private var newTool: String = ""
+    @State private var newPattern: String = ""
+    @State private var newReason: String = ""
+    @State private var newBehavior: PermissionRule.Behavior = .deny
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -521,7 +525,7 @@ private struct PermissionsTab: View {
                     .foregroundStyle(Color.atelierInkSecondary)
             }
             if projectRules.isEmpty {
-                Text("None yet. Add rules from the Approval Inbox: when a card pops up, the ▼ menu next to Accept offers \"Always accept … in \(project.name)\" and \"… matching <hint> in \(project.name)\".")
+                Text("None yet — add one below, or use the ▼ next to Accept in the Approval inbox.")
                     .font(AtelierFont.caption)
                     .foregroundStyle(Color.atelierInkSecondary)
                     .padding(.vertical, 4)
@@ -532,7 +536,32 @@ private struct PermissionsTab: View {
                     }
                 }
             }
+            addRuleForm
         }
+    }
+
+    private var addRuleForm: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SectionLabel("ADD A RULE")
+            HStack(spacing: 8) {
+                Picker("", selection: $newBehavior) {
+                    Text("deny").tag(PermissionRule.Behavior.deny)
+                    Text("allow").tag(PermissionRule.Behavior.allow)
+                }
+                .labelsHidden().pickerStyle(.menu).fixedSize()
+                TextField("tool — Bash, Read, * …", text: $newTool)
+                    .textFieldStyle(.roundedBorder)
+                TextField("pattern (optional) — *.swift, git push …", text: $newPattern)
+                    .textFieldStyle(.roundedBorder)
+                Button("Add") { addRule() }
+                    .disabled(newTool.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            TextField("reason (optional)", text: $newReason)
+                .textFieldStyle(.roundedBorder)
+        }
+        .padding(10)
+        .background(Color.atelierSurface.opacity(0.5), in: RoundedRectangle(cornerRadius: AtelierCorner.control))
+        .overlay(RoundedRectangle(cornerRadius: AtelierCorner.control).stroke(Color.atelierDivider, lineWidth: 1))
     }
 
     // MARK: Profile rules (read-only)
@@ -645,6 +674,25 @@ private struct PermissionsTab: View {
     private func remove(_ rule: PermissionRule) {
         do {
             _ = try ProjectPermissionStore.removeRule(matching: rule, projectPath: project.path)
+            reload()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func addRule() {
+        let tool = newTool.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tool.isEmpty else { return }
+        let pattern = newPattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reason = newReason.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rule = PermissionRule(tool: tool,
+                                  pattern: pattern.isEmpty ? nil : pattern,
+                                  behavior: newBehavior,
+                                  reason: reason.isEmpty ? nil : reason,
+                                  scope: .project)
+        do {
+            try ProjectPermissionStore.appendRule(rule, projectPath: project.path)
+            newTool = ""; newPattern = ""; newReason = ""
             reload()
         } catch {
             lastError = error.localizedDescription

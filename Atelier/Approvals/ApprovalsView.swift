@@ -14,6 +14,9 @@ struct ApprovalsView: View {
     let onOpenTask: (_ taskId: String) -> Void
 
     private let columns: [GridItem] = [GridItem(.adaptive(minimum: 380, maximum: 540), spacing: 14)]
+    @State private var projectFilter: String?
+
+    private static let readOnlyTools: Set<String> = ["Read", "Glob", "Grep", "LS"]
 
     var body: some View {
         ZStack {
@@ -24,6 +27,7 @@ struct ApprovalsView: View {
                 if queue.pending.isEmpty {
                     emptyState
                 } else {
+                    bulkBar
                     grid
                 }
             }
@@ -61,10 +65,59 @@ struct ApprovalsView: View {
         }
     }
 
+    private var visiblePending: [PendingApproval] {
+        guard let f = projectFilter else { return queue.pending }
+        return queue.pending.filter { $0.projectName == f }
+    }
+
+    private var pendingProjects: [String] {
+        Array(Set(queue.pending.compactMap { $0.projectName })).sorted()
+    }
+
+    /// Per-project filter chips + a safe bulk action for read-only tool calls.
+    private var bulkBar: some View {
+        let readIds = visiblePending.filter { Self.readOnlyTools.contains($0.toolName) }.map(\.id)
+        return HStack(spacing: 8) {
+            if pendingProjects.count > 1 {
+                filterChip(title: "All", active: projectFilter == nil) { projectFilter = nil }
+                ForEach(pendingProjects, id: \.self) { p in
+                    filterChip(title: p, active: projectFilter == p) {
+                        projectFilter = (projectFilter == p ? nil : p)
+                    }
+                }
+            }
+            Spacer()
+            if !readIds.isEmpty {
+                Button {
+                    for id in readIds { queue.resolve(id: id, with: .accept(updatedInput: nil)) }
+                } label: {
+                    Label("Accept \(readIds.count) read-only", systemImage: "checkmark.circle")
+                        .font(AtelierFont.caption.weight(.medium))
+                }
+                .buttonStyle(.bordered).controlSize(.small)
+                .help("Accept all pending read-only tool calls (Read / Glob / Grep / LS) shown here.")
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 10)
+    }
+
+    private func filterChip(title: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(AtelierFont.eyebrow.weight(.medium))
+                .foregroundStyle(active ? Color.atelierAccent : Color.atelierInkSecondary)
+                .padding(.horizontal, 9).padding(.vertical, 3)
+                .background(active ? Color.atelierAccentSoft.opacity(0.5) : Color.atelierSurface, in: Capsule())
+                .overlay(Capsule().stroke(active ? Color.atelierAccent.opacity(0.4) : Color.atelierDivider, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
     private var grid: some View {
         ScrollView {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
-                ForEach(queue.pending) { approval in
+                ForEach(visiblePending) { approval in
                     ApprovalScreenCard(
                         approval: approval,
                         project: queue.project(forAgent: approval.agentId),
