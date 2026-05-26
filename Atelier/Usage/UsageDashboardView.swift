@@ -53,9 +53,10 @@ struct UsageDashboardView: View {
                     Text("\(totalSessions) session\(totalSessions == 1 ? "" : "s")")
                         .font(AtelierFont.eyebrow)
                         .foregroundStyle(Color.atelierInkSecondary)
-                    Text(String(format: "· $%.4f all-time", allTime.cost))
+                    Text(String(format: "· $%.4f recorded", allTime.cost))
                         .font(AtelierFont.captionMono.weight(.semibold))
                         .foregroundStyle(Color.atelierAccent)
+                        .help("What Atelier has recorded since you started using it — not your entire Claude history.")
                 }
                 Spacer()
                 Button(action: { Task { await load() } }) {
@@ -194,7 +195,7 @@ struct UsageDashboardView: View {
         Window(id: "30d", label: "Last 30 days", records: windowRecords(sinceHoursAgo: 24 * 30))
     }
     private var allTime: Window {
-        Window(id: "all", label: "All-time", records: records)
+        Window(id: "all", label: "All recorded", records: records)
     }
 
     // MARK: Cards
