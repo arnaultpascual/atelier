@@ -205,7 +205,8 @@ struct TaskDetailView: View {
                         AtelierDivider()
                     }
 
-                autopilotReportSection
+                // The autopilot / Opus review now lives in ReviewSection's
+                // "Opus review" tab (above), so it isn't repeated here.
 
                 briefDisclosure
                     .frame(maxWidth: .infinity, alignment: .leading)

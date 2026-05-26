@@ -50,8 +50,12 @@ struct MainView: View {
             // Clear task selection when navigating to a different project or to swarm.
             selectedTaskID = nil
         }
+        // Drive the sheet off the resolved task, not just the id: if the task is
+        // deleted (e.g. Discard & delete from inside the sheet) it vanishes from
+        // the store, `selectedTask` goes nil, and the sheet dismisses instead of
+        // lingering as an empty card.
         .sheet(isPresented: Binding(
-            get: { selectedTaskID != nil },
+            get: { selectedTask != nil },
             set: { presented in if !presented { selectedTaskID = nil } }
         )) {
             taskDetailSheet

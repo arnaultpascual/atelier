@@ -53,6 +53,21 @@ enum SessionReader {
         }
     }
 
+    /// The id (filename minus `.jsonl`) of the most recently modified session for
+    /// `cwd`, or nil if none exists. Lets callers re-read the same session as
+    /// either events or chat messages.
+    static func latestSessionId(cwd: String) -> String? {
+        let dir = projectsRoot.appendingPathComponent(encodedDirectoryName(for: cwd))
+        guard FileManager.default.fileExists(atPath: dir.path) else { return nil }
+        let urls = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let sorted = urls.filter { $0.pathExtension == "jsonl" }.sorted { lhs, rhs in
+            let l = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let r = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return l > r
+        }
+        return sorted.first?.deletingPathExtension().lastPathComponent
+    }
+
     /// If we lost the sessionId for some reason, fall back to the *latest* JSONL
     /// inside the encoded directory.
     static func loadLatestSession(cwd: String) -> [StreamEvent]? {

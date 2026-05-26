@@ -881,7 +881,9 @@ private struct ChatRoomView: View {
 
 // MARK: - Chat bubble
 
-private struct ChatBubble: View {
+/// Clean conversational bubble (user accent / assistant markdown). Shared by the
+/// Chat view and the Review section's "Chat" conversation mode.
+struct ChatBubble: View {
     let message: ChatMessage
 
     var body: some View {
