@@ -4,6 +4,57 @@ All notable changes to Atelier are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha.2] — 2026-05-27
+
+A design + flow overhaul on top of the first alpha: the reused task-detail card is reworked for
+every lifecycle stage, Chat gains quality-of-life, and Autopilot gets faster, clearer, and more
+honest about cost.
+
+### Added
+
+- **Autopilot run grouping** — each finished run is grouped in the Done column as one card (its
+  `atelier/autopilot-<timestamp>` integration branch + its tasks), persisted to
+  `.atelier/autopilot/runs.json`. Open it for the combined diff (`base…integration`), per-task
+  outcomes, and a one-click **Merge into `<base>`** (`--no-ff`; conflicts abort cleanly).
+- **Inline Opus review** — the Review detail reviews in place (no modal), streams the verdict, and
+  **saves the review** so it survives the merge into Done; the parsed verdict shows as a header
+  chip. Autopilot's own reviews surface here too.
+- **Conversation modes** — clean chat bubbles vs the raw event stream, in both Chat and the Review
+  section, with per-message and whole-conversation copy.
+- **Auto-titled chats** — a new conversation gets a concise Haiku-generated title from its first
+  message, Claude-style.
+- **CLAUDE.md reviewer** — draft / review a project's `CLAUDE.md` in a roomy sheet (rendered
+  Preview / raw Edit) instead of a cramped inline box.
+- **Task run durations** — the Review / Done recap shows how long a task took (summed worker time).
+
+### Changed
+
+- **Task-detail redesign** — the reused card is rethought per stage: To-Do is brief-as-hero with a
+  compact meta strip (status / priority / model / depends-on / budget); Review and Done are calm
+  recaps behind a single segmented inspector (Changes / Conversation / Opus review).
+- **Autopilot reviews run in parallel** — a round is reviewed + auto-fixed concurrently (each
+  worktree is independent); only the git merges stay serial.
+- **Autopilot cost is complete** — Opus review and conflict-resolution spend now count toward the
+  run total (previously only build + fix workers were metered).
+- **Swarm** — running workers tick their elapsed time live, and the autopilot review / conflict
+  phases now show as cards (they aren't TaskSpawner runs).
+- **Approvals** — the deny action is labelled "Deny", with bulk "Accept all read-only" + a
+  per-project filter; permission rules can be added from the Permissions tab.
+- Flow fixes throughout: an in-app **Merge** button on Review with a protected-branch guard,
+  Discard options that move/delete instead of stranding a task, editable Fill-kanban drafts,
+  `git init` for non-git folders, "Create task from chat", Quick Spawn sharing the app model list,
+  a real autopilot start-confirm + detached-HEAD guard, and a refreshed welcome screen.
+
+### Fixed
+
+- Deleting the selected task (e.g. Discard & delete) no longer leaves an empty ghost detail card.
+- A Done task no longer mislabels itself "In review" or shows a duplicate "Done" badge.
+- Usage totals say "recorded" (what Atelier has tracked) instead of the over-claiming "all-time".
+- Chat web search is nudged so the model actually searches for real-time questions instead of
+  replying that it has no access.
+
+[1.0.0-alpha.2]: https://github.com/arnaultpascual/atelier/releases/tag/v1.0.0-alpha.2
+
 ## [1.0.0-alpha.1] — 2026-05-24
 
 First public release. Atelier graduates from a single-agent proof of concept into a full macOS
