@@ -136,10 +136,11 @@ private struct ProjectHeader: View {
                         Text(profile.name)
                             .font(AtelierFont.eyebrow)
                     }
-                    .foregroundStyle(Color.atelierAccent)
+                    .foregroundStyle(Color.atelierInkSecondary)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2)
-                    .background(Color.atelierAccentSoft.opacity(0.5), in: Capsule())
+                    .background(Color.atelierSurface, in: Capsule())
+                    .overlay(Capsule().stroke(Color.atelierDivider, lineWidth: 1))
                     .help(profile.description)
                 }
                 Text("\(taskCount) task\(taskCount == 1 ? "" : "s")")
@@ -165,11 +166,11 @@ private struct ProjectHeader: View {
                         Text("Fill kanban")
                             .font(AtelierFont.caption.weight(.medium))
                     }
-                    .foregroundStyle(Color.atelierAccent)
+                    .foregroundStyle(Color.atelierInkSecondary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(Color.atelierAccentSoft.opacity(0.5), in: Capsule())
-                    .overlay(Capsule().stroke(Color.atelierAccent.opacity(0.4), lineWidth: 1))
+                    .background(Color.atelierSurface, in: Capsule())
+                    .overlay(Capsule().stroke(Color.atelierDivider, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 .help("Decompose a brief into kanban tasks with Opus 4.7.")
@@ -197,7 +198,7 @@ private struct ProjectHeader: View {
                 .foregroundStyle(Color.atelierInkSecondary)
                 .textSelection(.enabled)
         }
-        .padding(.horizontal, 24)
+        .padding(.horizontal, AtelierSpacing.gutter)
         .padding(.bottom, 16)
         .overlay(alignment: .bottom) {
             Rectangle()
@@ -287,7 +288,7 @@ private struct KanbanBoard: View {
                     )
                 }
             }
-            .padding(.horizontal, 20)
+            .padding(.horizontal, AtelierSpacing.gutter)
             .padding(.vertical, 18)
         }
     }
@@ -321,7 +322,7 @@ private struct KanbanColumn: View {
             }
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    if status == .toDo && tasks.count >= 2 {
+                    if status == .toDo && executionWaves().count > 1 {
                         // Keep the decomposer's round/batch structure visible: group
                         // To Do by execution wave (derived live from dependsOn + done
                         // status), so you see what can run in parallel NOW (round 1)
@@ -332,7 +333,7 @@ private struct KanbanColumn: View {
                         }
                     } else {
                         ForEach(tasks) { card($0) }
-                        if tasks.isEmpty && status != .toDo {
+                        if tasks.isEmpty {
                             EmptyColumnHint(status: status)
                         }
                     }
@@ -435,9 +436,9 @@ private struct KanbanColumn: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Rectangle()
+            Circle()
                 .fill(accent)
-                .frame(width: 3, height: 14)
+                .frame(width: 7, height: 7)
             Text(status.displayName.uppercased())
                 .font(AtelierFont.eyebrow)
                 .foregroundStyle(Color.atelierInk)
@@ -476,7 +477,7 @@ private struct EmptyColumnHint: View {
         case .review: return "Move tasks here when the worker reports success."
         case .done: return "Final resting place after merge."
         case .blocked: return "Stalled tasks — track why in the detail pane."
-        default: return ""
+        case .toDo: return "No tasks yet — type above, or use Fill kanban to decompose a brief."
         }
     }
 }
