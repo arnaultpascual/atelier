@@ -250,7 +250,7 @@ private struct ApprovalScreenCard: View {
             Button {
                 onDecision(.deny(message: "User declined this tool call."))
             } label: {
-                Text("Ignore")
+                Text("Deny")
                     .font(.system(.callout))
                     .foregroundStyle(Color.atelierInkSecondary)
                     .padding(.horizontal, 12)

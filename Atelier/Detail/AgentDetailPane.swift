@@ -293,9 +293,7 @@ struct TaskDetailView: View {
     private var autopilotReportSection: some View {
         if let md = autopilotReportMarkdown() {
             DisclosureGroup(isExpanded: $autopilotExpanded) {
-                Text(md)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(Color.atelierInk)
+                MarkdownView(source: md)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
@@ -458,10 +456,8 @@ struct TaskDetailView: View {
                 suggestionPanel
             }
 
-            // Row 3: optional per-task budget cap in USD. Currently advisory —
-            // shown in the task sheet and tooltip; spawn-time enforcement
-            // lands in a follow-up slice once we wire cost-monitoring back
-            // through the worker stream.
+            // Row 3: optional per-task budget cap in USD. Hard cap — TaskSpawner
+            // SIGTERMs the worker as soon as total_cost_usd crosses it (enforceBudget).
             VStack(alignment: .leading, spacing: 5) {
                 Text("MAX COST (USD) — OPTIONAL")
                     .font(AtelierFont.eyebrow)

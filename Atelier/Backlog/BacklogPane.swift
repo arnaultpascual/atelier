@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 import SwiftUI
+import AppKit
 
-/// 5-column kanban for the selected project's tasks. Read + quick-add in slice 1.2a;
-/// drag-drop & status changes via picker land in 1.2b alongside spawning.
+/// 5-column kanban for the selected project's tasks: quick-add, drag-and-drop between
+/// columns to change status, spawning workers, and per-round autopilot.
 struct BacklogPane: View {
     @Bindable var store: AppStore
     @Bindable var spawner: TaskSpawner
@@ -343,6 +344,7 @@ private struct KanbanColumn: View {
     let tasks: [AtelierTask]
     @Binding var selectedTaskID: String?
     @State private var isDropTargeted = false
+    @State private var createError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -351,12 +353,16 @@ private struct KanbanColumn: View {
                 QuickAddRow { title in
                     Task {
                         do {
+                            createError = nil
                             let t = try await store.createTask(in: project, title: title)
                             selectedTaskID = t.id
                         } catch {
-                            // Log only — UI errors come in 1.2b when we have a task detail surface.
+                            createError = error.localizedDescription
                         }
                     }
+                }
+                if let createError {
+                    CalloutBanner(.danger, "Couldn't create task: \(createError)")
                 }
             }
             ScrollView(.vertical, showsIndicators: false) {
@@ -722,6 +728,7 @@ private struct AutopilotControl: View {
     let onClear: () -> Void
 
     @State private var showConfig = false
+    @State private var confirmDismiss = false
 
     var body: some View {
         if let run {
@@ -731,8 +738,7 @@ private struct AutopilotControl: View {
             case .paused(let reason):
                 pausedPill(reason)
             case .finished:
-                resultPill(icon: "checkmark.circle.fill", color: Palette.success,
-                           text: run.integrationBranch.isEmpty ? "Autopilot finished" : "Done → \(run.integrationBranch)")
+                finishedPill(run)
             case .failed(let msg):
                 resultPill(icon: "exclamationmark.triangle.fill", color: Palette.error, text: msg)
             }
@@ -755,7 +761,7 @@ private struct AutopilotControl: View {
             }
             .buttonStyle(.bordered).controlSize(.small)
             .help("Continue on the same feature branch — re-integrates finished tasks, then builds the rest.")
-            Button { onClear() } label: {
+            Button { confirmDismiss = true } label: {
                 Image(systemName: "xmark").font(.system(size: 9, weight: .medium))
                     .foregroundStyle(Color.atelierInkSecondary)
             }
@@ -765,6 +771,12 @@ private struct AutopilotControl: View {
         .padding(.horizontal, 10).padding(.vertical, 4)
         .background(Palette.warning.opacity(0.12), in: Capsule())
         .overlay(Capsule().stroke(Palette.warning.opacity(0.3), lineWidth: 1))
+        .confirmationDialog("Discard this paused autopilot run?", isPresented: $confirmDismiss, titleVisibility: .visible) {
+            Button("Discard", role: .destructive) { onClear() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The feature branch stays on disk, but you'll lose the in-app Resume handle to it.")
+        }
     }
 
     private func resultPill(icon: String, color: Color, text: String) -> some View {
@@ -784,6 +796,43 @@ private struct AutopilotControl: View {
         .padding(.horizontal, 10).padding(.vertical, 4)
         .background(color.opacity(0.12), in: Capsule())
         .overlay(Capsule().stroke(color.opacity(0.3), lineWidth: 1))
+    }
+
+    /// Finished run — names the integration branch and offers copy actions so it isn't a dead string.
+    private func finishedPill(_ run: AutopilotRun) -> some View {
+        let branch = run.integrationBranch
+        return HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill").font(.system(size: 11)).foregroundStyle(Palette.success)
+            Text(branch.isEmpty ? "Autopilot finished" : "Done → \(branch)")
+                .font(AtelierFont.caption.weight(.medium))
+                .foregroundStyle(Palette.success)
+                .lineLimit(1)
+                .help(branch.isEmpty ? "Autopilot finished." : "Built onto \(branch). Review it, then merge into your branch.")
+            if !branch.isEmpty {
+                Menu {
+                    Button("Copy branch name") { copyToPasteboard(branch) }
+                    Button("Copy merge command") { copyToPasteboard("git merge --no-ff \(branch)") }
+                    Button("Copy checkout command") { copyToPasteboard("git checkout \(branch)") }
+                } label: {
+                    Image(systemName: "doc.on.doc").font(.system(size: 10))
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+                .help("Copy the branch name or a git command to integrate it")
+            }
+            Button { onClear() } label: {
+                Image(systemName: "xmark").font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Color.atelierInkSecondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 4)
+        .background(Palette.success.opacity(0.12), in: Capsule())
+        .overlay(Capsule().stroke(Palette.success.opacity(0.3), lineWidth: 1))
+    }
+
+    private func copyToPasteboard(_ s: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(s, forType: .string)
     }
 
     private var startButton: some View {
@@ -858,6 +907,7 @@ private struct AutopilotConfigPopover: View {
 
     @State private var batches: Int
     @State private var budgetText = ""
+    @State private var confirmStart = false
 
     init(rounds: [AutopilotRoundPreview],
          canStart: Bool,
@@ -912,17 +962,23 @@ private struct AutopilotConfigPopover: View {
             .help("Autopilot auto-accepts every tool call except the deny rules you set here.")
             HStack {
                 Spacer()
-                Button("Start") {
-                    let cap = Double(budgetText.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: "."))
-                    onStart(batches, (cap ?? 0) > 0 ? cap : nil)
-                    dismiss()
-                }
+                Button("Start") { confirmStart = true }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canStart)
             }
         }
         .padding(16)
         .frame(width: 360)
+        .confirmationDialog("Start unsupervised autopilot?", isPresented: $confirmStart, titleVisibility: .visible) {
+            Button("Start \(batches) batch\(batches == 1 ? "" : "es")", role: .destructive) {
+                let cap = Double(budgetText.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: "."))
+                onStart(batches, (cap ?? 0) > 0 ? cap : nil)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Autopilot builds, reviews, fixes and auto-merges \(batches) round\(batches == 1 ? "" : "s") onto a throwaway atelier/autopilot-* branch — unattended, with tool approvals auto-accepted except your explicit deny rules.")
+        }
     }
 
     /// Rounds beyond the chosen batch count are dimmed (greyed) and tagged "· not this run".
@@ -1050,7 +1106,7 @@ private struct OnboardingPanel: View {
                 Text("Welcome to Atelier")
                     .font(AtelierFont.display)
                     .foregroundStyle(Color.atelierInk)
-                Text("A native macOS workspace for orchestrating Claude Code workers,\none task at a time — soon, several in parallel.")
+                Text("A native macOS studio for orchestrating parallel Claude Code workers —\neach in its own git worktree, gated by human-in-the-loop approvals.")
                     .font(AtelierFont.body)
                     .foregroundStyle(Color.atelierInkSecondary)
                     .lineSpacing(2)
@@ -1063,8 +1119,7 @@ private struct OnboardingPanel: View {
                 StepRow(number: "03", title: "Capture tasks",
                         body: "In the To Do column, type a title and press Return — Atelier writes `backlog/tasks/<id>-<slug>.md` for you.")
                 StepRow(number: "04", title: "Spawn a worker",
-                        body: "Click a task, hit Spawn (slice 1.2b). Until then, ⌘⇧Q opens Quick Spawn for one-shot prompts.",
-                        muted: true)
+                        body: "Open a task and hit Spawn — its worker runs in an isolated git worktree. Or use Autopilot to build a whole round of tasks hands-off.")
             }
         }
         .frame(maxWidth: 580, alignment: .leading)

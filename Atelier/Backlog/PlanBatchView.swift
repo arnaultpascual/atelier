@@ -19,6 +19,7 @@ struct PlanBatchView: View {
     @State private var batches: Int = 1
     @State private var budgetText: String = ""
     @State private var dropTargetRound: Int?
+    @State private var confirmStart = false
 
     private var allTasks: [AtelierTask] { store.tasks(in: project.id) }
     private var todo: [AtelierTask] { allTasks.filter { $0.status == .toDo } }
@@ -50,6 +51,12 @@ struct PlanBatchView: View {
         .frame(minWidth: 720, idealWidth: 920, minHeight: 520, idealHeight: 700)
         .background(Color.atelierBackground)
         .onAppear { batches = max(1, waves.count) }
+        .confirmationDialog("Start unsupervised autopilot?", isPresented: $confirmStart, titleVisibility: .visible) {
+            Button("Start \(batches) batch\(batches == 1 ? "" : "es")", role: .destructive) { start() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Autopilot builds, reviews, fixes and auto-merges \(batches) round\(batches == 1 ? "" : "s") onto a throwaway atelier/autopilot-* branch — unattended, with tool approvals auto-accepted except your explicit deny rules. Your branch is untouched and nothing is pushed.")
+        }
     }
 
     // MARK: Header (config + launch)
@@ -95,7 +102,7 @@ struct PlanBatchView: View {
     private var startButton: some View {
         let running = featureRunner.isActive(projectId: project.id)
         let ready = canStart && !running
-        Button(action: start) {
+        Button(action: { confirmStart = true }) {
             HStack(spacing: 5) {
                 Image(systemName: "infinity").font(.system(size: 10))
                 Text(running ? "Autopilot running" : "Start")
