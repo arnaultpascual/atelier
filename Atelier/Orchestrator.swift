@@ -9,20 +9,6 @@ import Observation
 @MainActor
 @Observable
 final class Orchestrator {
-    struct ModelOption: Sendable, Hashable {
-        let label: String
-        let id: String
-        let warning: String?
-    }
-
-    static let models: [ModelOption] = [
-        .init(label: "Sonnet 4.6 (default)", id: "claude-sonnet-4-6", warning: nil),
-        .init(label: "Opus 4.7", id: "claude-opus-4-7",
-              warning: "New tokenizer — Anthropic reports ~1.0×–1.35× more tokens vs Opus 4.6 for the same text."),
-        .init(label: "Opus 4.6", id: "claude-opus-4-6", warning: nil),
-        .init(label: "Haiku 4.5", id: "claude-haiku-4-5-20251001", warning: nil)
-    ]
-
     var apiKey: String = ""
     var prompt: String = "Echo back the words: hello atelier"
     var selectedModelId: String = "claude-sonnet-4-6"
@@ -31,8 +17,12 @@ final class Orchestrator {
     var claudePathResolved: String? = ClaudeLocator.locate()
     var workingDirectory: String = NSHomeDirectory()   // user picks via folder dialog
 
-    var selectedModel: ModelOption {
-        Self.models.first(where: { $0.id == selectedModelId }) ?? Self.models[0]
+    /// Quick Spawn shares the app-wide model list (`ModelRouter.Model`) instead of a private one.
+    /// Opus 4.7's tokenizer note is the single model caveat worth surfacing here.
+    var selectedModelWarning: String? {
+        selectedModelId == "claude-opus-4-7"
+            ? "New tokenizer — Anthropic reports ~1.0×–1.35× more tokens vs Opus 4.6 for the same text."
+            : nil
     }
 
     func canSpawn(server: ApprovalServer) -> Bool {

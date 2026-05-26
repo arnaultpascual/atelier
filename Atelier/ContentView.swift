@@ -93,8 +93,8 @@ private struct ControlsBar: View {
                     .background(Color.atelierSurface, in: RoundedRectangle(cornerRadius: AtelierCorner.control))
                     .overlay(RoundedRectangle(cornerRadius: AtelierCorner.control).stroke(Color.atelierDivider, lineWidth: 1))
                 Picker("", selection: $orchestrator.selectedModelId) {
-                    ForEach(Orchestrator.models, id: \.id) { model in
-                        Text(model.label).tag(model.id)
+                    ForEach(ModelRouter.Model.allCases, id: \.rawValue) { model in
+                        Text(model.displayName).tag(model.rawValue)
                     }
                 }
                 .labelsHidden()
@@ -106,7 +106,7 @@ private struct ControlsBar: View {
                     .help("Pass --include-partial-messages to claude. Token-by-token streaming, noisier UI.")
             }
 
-            if let warning = orchestrator.selectedModel.warning {
+            if let warning = orchestrator.selectedModelWarning {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill").imageScale(.small)
                     Text(warning)
