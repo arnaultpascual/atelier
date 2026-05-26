@@ -151,6 +151,13 @@ actor WorkerRunner {
             if !invocation.chatAllowWeb { disallowed += ["WebFetch", "WebSearch"] }
             arguments.append("--disallowed-tools")
             arguments.append(contentsOf: disallowed)
+            // The model has WebSearch/WebFetch when web is on, but won't reach for
+            // them on a casual question unless told to — nudge it so "what's the
+            // weather" actually searches instead of "I have no real-time access".
+            if invocation.chatAllowWeb {
+                arguments.append(contentsOf: ["--append-system-prompt",
+                    "You have WebSearch and WebFetch tools available. For anything that needs current or real-time information — weather, news, prices, schedules, recent events, live status — use WebSearch first instead of replying that you lack real-time access."])
+            }
         }
         if let resumeId = invocation.resumeSessionId, !resumeId.isEmpty {
             arguments.append(contentsOf: ["--resume", resumeId])

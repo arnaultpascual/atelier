@@ -126,6 +126,30 @@ final class ChatSpawner {
         }
         let stderrSink: @Sendable (String) async -> Void = { _ in }
 
+        // Claude-style auto-title: on the first message, generate a concise Haiku
+        // title from the user's prompt IN PARALLEL with the response, so the
+        // conversation gets a real name within a beat. The post-run persist below
+        // preserves whatever title lands here (and won't clobber a user rename).
+        let wasUntitled = (room.title == "Untitled chat")
+        if wasUntitled {
+            let roomId = room.id
+            let userMsg = message
+            let key = invocation.apiKey
+            Task {
+                do {
+                    let title = try await AIAssistant.titleForConversation(
+                        userMessage: userMsg, assistantReply: "",
+                        apiKey: key.isEmpty ? nil : key)
+                    guard var latest = store.chatRoom(id: roomId) else { return }
+                    latest.title = title
+                    latest.updatedAt = Date()
+                    try await store.updateChatRoom(latest)
+                } catch {
+                    logger.error("auto-title failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+
         do {
             try await runner.runChat(invocation: invocation,
                                      onEvent: eventSink,
@@ -136,12 +160,18 @@ final class ChatSpawner {
             }
         }
 
-        // Persist cumulative totals back into the room.
+        // Persist cumulative totals back into the room. Pull the latest title
+        // first so we don't clobber an auto-title (or user rename) that landed
+        // while the worker was running.
         var updated = room
+        if let currentTitle = store.chatRoom(id: room.id)?.title {
+            updated.title = currentTitle
+        }
         if updated.sessionId == nil, let sid = liveTurn.sessionId {
             updated.sessionId = sid
         }
-        if updated.title == "Untitled chat" {
+        if wasUntitled && updated.title == "Untitled chat" {
+            // Auto-title hasn't landed yet — show the first line meanwhile.
             let firstLine = message.split(separator: "\n").first.map(String.init) ?? message
             updated.title = String(firstLine.prefix(60))
         }

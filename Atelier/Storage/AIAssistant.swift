@@ -106,6 +106,42 @@ enum AIAssistant {
         return trimmed
     }
 
+    // MARK: - Conversation title
+
+    /// Generates a concise, Claude-style conversation title (3–6 words) from the
+    /// opening exchange. Throws like `ask` so the caller can fall back to the
+    /// first line of the message.
+    static func titleForConversation(userMessage: String,
+                                     assistantReply: String,
+                                     apiKey: String? = nil) async throws -> String {
+        let user = String(userMessage.trimmingCharacters(in: .whitespacesAndNewlines).prefix(800))
+        let assistant = String(assistantReply.trimmingCharacters(in: .whitespacesAndNewlines).prefix(800))
+        let prompt = """
+        Write a short, specific title for this conversation: 3 to 6 words, Title Case, \
+        no surrounding quotes, no trailing punctuation, no emoji. Reply with ONLY the title.
+
+        User: \(user)
+        \(assistant.isEmpty ? "" : "Assistant: \(assistant)")
+        """
+        let raw = try await ask(prompt: prompt, apiKey: apiKey)
+        let title = sanitizeTitle(raw)
+        if title.isEmpty { throw Error.empty }
+        return title
+    }
+
+    /// Strips the noise models sometimes add around a one-line title (a "Title:"
+    /// prefix, wrapping quotes, trailing punctuation, extra lines).
+    private static func sanitizeTitle(_ raw: String) -> String {
+        var t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let r = t.range(of: "Title:", options: [.caseInsensitive, .anchored]) {
+            t = String(t[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+        }
+        t = t.split(whereSeparator: \.isNewline).first.map(String.init) ?? t
+        t = t.trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”` "))
+        while let last = t.last, ".!,;:".contains(last) { t.removeLast() }
+        return String(t.prefix(60))
+    }
+
     // MARK: - Improve description
 
     /// Asks Haiku to rewrite a task description so a Claude Code worker has a clearer
