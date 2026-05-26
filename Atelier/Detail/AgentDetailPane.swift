@@ -811,11 +811,11 @@ struct TaskDetailView: View {
 
     @ViewBuilder
     private var spawnButton: some View {
-        let isReady = canSpawn
-        Button(action: spawnWorker) {
+        let isReady = canSpawnIgnoringDirty
+        Button(action: { if dirty { saveAndSpawn() } else { spawnWorker() } }) {
             HStack(spacing: 5) {
                 Image(systemName: "play.fill").font(.system(size: 10))
-                Text(dirty ? "Save to Spawn" : "Spawn")
+                Text(dirty ? "Save & Spawn" : "Spawn")
                     .font(.system(.callout).weight(.semibold))
             }
             .padding(.horizontal, 14)
@@ -837,19 +837,23 @@ struct TaskDetailView: View {
         .help(spawnHelpText)
     }
 
-    private var canSpawn: Bool {
+    /// Spawnable ignoring unsaved edits — used to enable "Save & Spawn" (which saves first).
+    private var canSpawnIgnoringDirty: Bool {
         guard let project = selectedProject else { return false }
-        if dirty { return false }       // force Save first so the worker reads the saved prompt
         if !server.helperReady { return false }
         if spawner.hasLiveWorker(for: task.id) { return false }
         return FileManager.default.fileExists(atPath: project.path)
     }
 
+    private var canSpawn: Bool {
+        canSpawnIgnoringDirty && !dirty
+    }
+
     private var spawnHelpText: String {
         if selectedProject == nil { return "Select a project first." }
-        if dirty { return "Save unsaved changes first (⌘S)." }
         if !server.helperReady { return "MCP helper binary missing — rebuild the app." }
         if spawner.hasLiveWorker(for: task.id) { return "A worker is already running on this task." }
+        if dirty { return "Saves your unsaved edits, then spawns a worker in a git worktree." }
         return "Spawn a claude worker on this task. A git worktree is created under `.atelier-worktrees/\(task.id)/`."
     }
 
@@ -989,8 +993,7 @@ struct TaskDetailView: View {
         return "\(n)"
     }
 
-    private func save() {
-        guard dirty else { return }
+    private func buildUpdatedTask() -> AtelierTask {
         var updated = task
         updated.title = editingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         if updated.title.isEmpty { updated.title = "Untitled task" }
@@ -1005,11 +1008,36 @@ struct TaskDetailView: View {
             updated.budgetUsd = v
         }
         updated.dependsOn = Array(editingDependsOn).sorted()
+        return updated
+    }
+
+    private func save() {
+        guard dirty else { return }
+        let updated = buildUpdatedTask()
         Task {
             do {
                 try await store.updateTask(updated)
                 dirty = false
                 saveError = nil
+            } catch {
+                saveError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Save any pending edits, then spawn a worker on the freshly-saved task, so the worker
+    /// always reads the prompt you see — in one click.
+    private func saveAndSpawn() {
+        guard let project = selectedProject else { return }
+        let updated = buildUpdatedTask()
+        Task {
+            do {
+                try await store.updateTask(updated)
+                dirty = false
+                saveError = nil
+                spawner.start(task: updated, project: project,
+                              apiKey: APIKeyResolver.resolve(),
+                              store: store, server: server, approvalQueue: approvalQueue)
             } catch {
                 saveError = error.localizedDescription
             }
