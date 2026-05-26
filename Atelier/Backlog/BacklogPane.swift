@@ -1171,30 +1171,48 @@ private struct QuickAddRow: View {
 
 private struct OnboardingPanel: View {
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Welcome to Atelier")
-                    .font(AtelierFont.display)
-                    .foregroundStyle(Color.atelierInk)
-                Text("A native macOS studio for orchestrating parallel Claude Code workers —\neach in its own git worktree, gated by human-in-the-loop approvals.")
-                    .font(AtelierFont.body)
-                    .foregroundStyle(Color.atelierInkSecondary)
-                    .lineSpacing(2)
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Welcome to Atelier")
+                        .font(AtelierFont.display)
+                        .foregroundStyle(Color.atelierInk)
+                    Text("A native macOS studio for orchestrating parallel Claude Code workers — each in its own git worktree, gated by human-in-the-loop approvals.")
+                        .font(AtelierFont.body)
+                        .foregroundStyle(Color.atelierInkSecondary)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                VStack(alignment: .leading, spacing: 16) {
+                    StepRow(number: "01", title: "Create a workspace",
+                            body: "A workspace groups projects by client or context. From the sidebar, hit New workspace.")
+                    StepRow(number: "02", title: "Add a project",
+                            body: "Point Atelier at a git repository. We scaffold `backlog/`, `.atelier/` and extend `.gitignore`.")
+                    StepRow(number: "03", title: "Capture tasks",
+                            body: "In the To Do column, type a title and press Return — Atelier writes `backlog/tasks/<id>-<slug>.md` for you.")
+                    StepRow(number: "04", title: "Spawn a worker",
+                            body: "Open a task and hit Spawn — its worker runs in an isolated git worktree, so parallel workers never collide.")
+                }
+
+                AtelierDivider().frame(maxWidth: 560)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Two ways to run")
+                        .font(AtelierFont.subtitle)
+                        .foregroundStyle(Color.atelierInk)
+                    ModeRow(icon: "hand.raised.fill",
+                            title: "Human-in-the-loop",
+                            detail: "Every file write, command and search pauses for your approval in the Approvals inbox — you sign off on each step.")
+                    ModeRow(icon: "infinity",
+                            title: "Autopilot",
+                            detail: "Hands-off: Atelier builds a whole round in parallel, has Opus review each worktree, and merges only what passes — pausing on anything risky.")
+                }
             }
-            VStack(alignment: .leading, spacing: 16) {
-                StepRow(number: "01", title: "Create a workspace",
-                        body: "A workspace groups projects by client or context. From the sidebar, hit New workspace.")
-                StepRow(number: "02", title: "Add a project",
-                        body: "Point Atelier at a git repository. We scaffold `backlog/`, `.atelier/` and extend `.gitignore`.")
-                StepRow(number: "03", title: "Capture tasks",
-                        body: "In the To Do column, type a title and press Return — Atelier writes `backlog/tasks/<id>-<slug>.md` for you.")
-                StepRow(number: "04", title: "Spawn a worker",
-                        body: "Open a task and hit Spawn — its worker runs in an isolated git worktree. Or use Autopilot to build a whole round of tasks hands-off.")
-            }
+            .frame(maxWidth: 600, alignment: .leading)
+            .padding(.horizontal, 36)
+            .padding(.top, 44)
+            .padding(.bottom, 36)
         }
-        .frame(maxWidth: 580, alignment: .leading)
-        .padding(.horizontal, 36)
-        .padding(.top, 44)
     }
 }
 
@@ -1239,11 +1257,42 @@ private struct StepRow: View {
                 Text(title)
                     .font(AtelierFont.subtitle)
                     .foregroundStyle(Color.atelierInk)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(detail)
                     .font(AtelierFont.caption)
                     .foregroundStyle(Color.atelierInkSecondary)
                     .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// One of the two run modes shown at the foot of the welcome panel.
+private struct ModeRow: View {
+    let icon: String
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.atelierAccent)
+                .frame(width: 28, alignment: .leading)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(AtelierFont.subtitle)
+                    .foregroundStyle(Color.atelierInk)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(detail)
+                    .font(AtelierFont.caption)
+                    .foregroundStyle(Color.atelierInkSecondary)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
