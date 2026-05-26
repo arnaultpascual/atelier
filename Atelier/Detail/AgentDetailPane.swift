@@ -20,6 +20,7 @@ struct TaskDetailView: View {
     @State private var editingWorkerModel: String?       // nil = Auto
     @State private var editingBudgetUsd: String = ""
     @State private var editingDependsOn: Set<String> = []
+    @State private var showDepsPopover: Bool = false
     @State private var dirty: Bool = false
     @State private var saveError: String?
     @State private var suggestionState: SuggestionState = .idle
@@ -115,43 +116,22 @@ struct TaskDetailView: View {
 
     // MARK: Editable body (To Do / In Progress / Blocked)
 
+    /// To Do / In Progress / Blocked: the brief is the hero. A compact strip of
+    /// controls (status, priority, model, deps, budget) sits on top; the prompt
+    /// editor fills the rest; a sticky footer carries Spawn / Save / Delete.
     private var editableBody: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 0) {
-                // Left rail — how the task runs, what it waits on, what it has cost.
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        metadata
-                        if (taskUsage?.runs ?? 0) > 0 {
-                            taskCostStrip
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 14) {
+                metaStrip
+                suggestionPanel
+                if !dependencyCycles.isEmpty {
+                    CalloutBanner(.danger, "Dependency cycle: \(dependencyCycles.sorted().joined(separator: ", ")) already wait on this task. Remove one to keep the graph runnable.")
                 }
-                .frame(width: 320)
-
-                Rectangle().fill(Color.atelierDivider.opacity(0.6)).frame(width: 1)
-
-                // Main column — attachments, optional autopilot review, then the prompt editor (fills).
-                VStack(alignment: .leading, spacing: 0) {
-                    AttachmentsSection(store: store, task: task)
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 14)
-                        .overlay(alignment: .bottom) { AtelierDivider() }
-
-                    autopilotReportSection
-
-                    descriptionEditor
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 16)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                briefHero
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             footer
                 .padding(.horizontal, 24)
@@ -161,6 +141,136 @@ struct TaskDetailView: View {
                 }
                 .background(Color.atelierBackground)
         }
+    }
+
+    /// The prompt editor (hero) plus a compact attachments row beneath it.
+    private var briefHero: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            descriptionEditor
+            AttachmentsSection(store: store, task: task)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    // MARK: Meta strip (compact, replaces the old left rail)
+
+    private var metaStrip: some View {
+        HStack(alignment: .top, spacing: 18) {
+            metaField("STATUS") { statusMenu }
+            metaField("PRIORITY") { priorityMenu }
+            metaField("MODEL") {
+                HStack(spacing: 6) {
+                    modelMenu
+                    suggestButton
+                }
+            }
+            metaField("DEPENDS ON") { dependsControl }
+            metaField("MAX $") { budgetField }
+            if (taskUsage?.runs ?? 0) > 0 {
+                metaField("SPENT") {
+                    Text(String(format: "$%.4f", taskUsage?.cost ?? 0))
+                        .font(AtelierFont.captionMono.weight(.semibold))
+                        .foregroundStyle(Color.atelierAccent)
+                        .padding(.vertical, 5)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(Color.atelierSurface.opacity(0.5), in: RoundedRectangle(cornerRadius: AtelierCorner.card))
+        .overlay(RoundedRectangle(cornerRadius: AtelierCorner.card).stroke(Color.atelierDivider, lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private func metaField<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label)
+                .font(AtelierFont.eyebrow)
+                .foregroundStyle(Color.atelierInkSecondary)
+            content()
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    /// Shared look for the strip's menu/buttons: value + chevron in a bordered chip.
+    private func metaChip(_ text: String) -> some View {
+        HStack(spacing: 4) {
+            Text(text).font(.system(.callout)).lineLimit(1)
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(Color.atelierInkSecondary)
+        }
+        .foregroundStyle(Color.atelierInk)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Color.atelierSurface, in: RoundedRectangle(cornerRadius: AtelierCorner.control))
+        .overlay(RoundedRectangle(cornerRadius: AtelierCorner.control).stroke(Color.atelierDivider, lineWidth: 1))
+    }
+
+    private var statusMenu: some View {
+        Menu {
+            ForEach(AtelierTask.Status.kanbanOrder, id: \.self) { s in
+                Button(s.displayName) { editingStatus = s; dirty = true }
+            }
+        } label: {
+            metaChip(editingStatus.displayName)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private var priorityMenu: some View {
+        Menu {
+            Button("—") { editingPriority = nil; dirty = true }
+            ForEach(AtelierTask.Priority.allCases, id: \.self) { p in
+                Button(p.displayName) { editingPriority = p; dirty = true }
+            }
+        } label: {
+            metaChip(editingPriority?.displayName ?? "—")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private var modelMenu: some View {
+        Menu {
+            Button("Auto — Atelier picks") { editingWorkerModel = nil; dirty = true; clearSuggestion() }
+            Divider()
+            ForEach(ModelRouter.Model.allCases, id: \.rawValue) { m in
+                Button(m.displayName) { editingWorkerModel = m.rawValue; dirty = true; clearSuggestion() }
+            }
+        } label: {
+            metaChip(editingWorkerModel.map(prettyModelName) ?? "Auto")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Which model the worker spawns with. Auto lets Atelier pick at spawn time.")
+    }
+
+    private func clearSuggestion() {
+        if case .suggested = suggestionState { suggestionState = .idle }
+    }
+
+    private var dependsControl: some View {
+        Button { showDepsPopover = true } label: {
+            metaChip(editingDependsOn.isEmpty ? "None" : "\(editingDependsOn.count)")
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .popover(isPresented: $showDepsPopover, arrowEdge: .bottom) {
+            dependsPopover
+        }
+    }
+
+    private var budgetField: some View {
+        TextField("none", text: $editingBudgetUsd)
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 84)
+            .onChange(of: editingBudgetUsd) { _, _ in dirty = true }
+            .help("Hard cap in USD — the worker is SIGTERM'd as soon as total_cost_usd crosses it. Empty = no cap.")
     }
 
     // MARK: Locked review body
@@ -245,7 +355,6 @@ struct TaskDetailView: View {
     }
 
     @State private var briefExpanded: Bool = false
-    @State private var autopilotExpanded: Bool = false
 
     private var briefDisclosure: some View {
         DisclosureGroup(isExpanded: $briefExpanded) {
@@ -285,45 +394,6 @@ struct TaskDetailView: View {
             }
             .foregroundStyle(Color.atelierInkSecondary)
         }
-    }
-
-    // MARK: Autopilot report (persisted by FeatureBuildRunner)
-
-    /// Shows the autopilot's per-task report (review verdict + findings + outcome) when the run
-    /// wrote one to `<project>/.atelier/autopilot/<taskId>.md`. Renders nothing otherwise, so it's
-    /// invisible for manually-run tasks.
-    @ViewBuilder
-    private var autopilotReportSection: some View {
-        if let md = autopilotReportMarkdown() {
-            DisclosureGroup(isExpanded: $autopilotExpanded) {
-                MarkdownView(source: md)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(Color.atelierSurface, in: RoundedRectangle(cornerRadius: AtelierCorner.control))
-                    .overlay(RoundedRectangle(cornerRadius: AtelierCorner.control).stroke(Color.atelierDivider, lineWidth: 1))
-                    .padding(.top, 6)
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "infinity").font(.system(size: 10))
-                    Text("Autopilot review").font(AtelierFont.eyebrow)
-                    Spacer()
-                }
-                .foregroundStyle(Color.atelierAccent)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 36)
-            .padding(.vertical, 12)
-            .overlay(alignment: .bottom) {
-                AtelierDivider()
-            }
-        }
-    }
-
-    private func autopilotReportMarkdown() -> String? {
-        guard let project = selectedProject else { return nil }
-        let url = URL(fileURLWithPath: project.path).appendingPathComponent(".atelier/autopilot/\(task.id).md")
-        return try? String(contentsOf: url, encoding: .utf8)
     }
 
     private var lockedFooter: some View {
@@ -401,94 +471,17 @@ struct TaskDetailView: View {
 
     // MARK: Metadata
 
-    private var metadata: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            // Row 1: status + priority side-by-side (short labels fit in narrow inspector)
-            HStack(alignment: .top, spacing: 14) {
-                metaColumn("STATUS") {
-                    Picker("", selection: $editingStatus) {
-                        ForEach(AtelierTask.Status.kanbanOrder, id: \.self) { s in
-                            Text(s.displayName).tag(s)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .onChange(of: editingStatus) { _, _ in dirty = true }
-                }
-                metaColumn("PRIORITY") {
-                    Picker("", selection: Binding(
-                        get: { editingPriority },
-                        set: { editingPriority = $0; dirty = true }
-                    )) {
-                        Text("—").tag(Optional<AtelierTask.Priority>.none)
-                        ForEach(AtelierTask.Priority.allCases, id: \.self) { p in
-                            Text(p.displayName).tag(Optional(p))
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                }
-            }
-
-            // Row 2: model picker on its own row (full width — labels are longer)
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("MODEL")
-                        .font(AtelierFont.eyebrow)
-                        .foregroundStyle(Color.atelierInkSecondary)
-                    Spacer()
-                    suggestButton
-                }
-                Picker("", selection: Binding(
-                    get: { editingWorkerModel ?? "auto" },
-                    set: { newValue in
-                        editingWorkerModel = newValue == "auto" ? nil : newValue
-                        dirty = true
-                        if case .suggested = suggestionState { suggestionState = .idle }
-                    }
-                )) {
-                    Text("Auto — Atelier picks at spawn").tag("auto")
-                    Divider()
-                    ForEach(ModelRouter.Model.allCases, id: \.rawValue) { m in
-                        Text(m.displayName).tag(m.rawValue)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                suggestionPanel
-            }
-
-            // Row 3: optional per-task budget cap in USD. Hard cap — TaskSpawner
-            // SIGTERMs the worker as soon as total_cost_usd crosses it (enforceBudget).
-            VStack(alignment: .leading, spacing: 5) {
-                Text("MAX COST (USD) — OPTIONAL")
-                    .font(AtelierFont.eyebrow)
-                    .foregroundStyle(Color.atelierInkSecondary)
-                TextField("e.g. 1.00 — empty = no cap",
-                          text: $editingBudgetUsd)
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: editingBudgetUsd) { _, _ in dirty = true }
-                Text("Hard cap. The worker is SIGTERM'd as soon as `total_cost_usd` crosses this value. Leave empty for no cap.")
-                    .font(AtelierFont.caption)
-                    .foregroundStyle(Color.atelierInkSecondary)
-            }
-
-            // Row 4: dependencies — the lever for organizing tasks into batches (rounds).
-            dependsOnEditor
-        }
-    }
-
     // MARK: Dependencies (batch organization)
 
     /// Pick which other tasks must finish before this one — this is what assigns a task to a
     /// later batch/round. No dependencies → it runs in round 1.
-    private var dependsOnEditor: some View {
+    /// Dependency picker shown in a popover off the "DEPENDS ON" chip. Same
+    /// checklist (with round badges + cycle guard) as before, just compact.
+    private var dependsPopover: some View {
         let all = selectedProject.map { store.tasks(in: $0.id) } ?? []
         let others = all.filter { $0.id != task.id }
         let roundOf = dependencyRoundMap(all: all)
-        let cycles = editingDependsOn.intersection(dependentsClosure(of: task.id, in: all))
-        return VStack(alignment: .leading, spacing: 5) {
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 SectionLabel("DEPENDS ON")
                 Spacer()
@@ -498,8 +491,8 @@ struct TaskDetailView: View {
                         .foregroundStyle(Color.atelierInkSecondary.opacity(0.8))
                 }
             }
-            if !cycles.isEmpty {
-                CalloutBanner(.danger, "Cycle: \(cycles.sorted().joined(separator: ", ")) already wait on this task. Uncheck to keep the graph runnable.")
+            if !dependencyCycles.isEmpty {
+                CalloutBanner(.danger, "Cycle: \(dependencyCycles.sorted().joined(separator: ", ")) already wait on this task. Uncheck to keep the graph runnable.")
             }
             if others.isEmpty {
                 Text("No other tasks yet — add more, then pick which must finish first.")
@@ -533,12 +526,20 @@ struct TaskDetailView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxHeight: 140)
+                .frame(maxHeight: 260)
                 Text("Tasks you depend on must reach Done before this one runs — that's what moves it into a later batch. No dependencies = round 1.")
                     .font(AtelierFont.caption)
                     .foregroundStyle(Color.atelierInkSecondary)
             }
         }
+        .padding(14)
+        .frame(width: 340)
+    }
+
+    /// Selected dependencies that (transitively) depend back on this task — a cycle.
+    private var dependencyCycles: Set<String> {
+        let all = selectedProject.map { store.tasks(in: $0.id) } ?? []
+        return editingDependsOn.intersection(dependentsClosure(of: task.id, in: all))
     }
 
     /// Round (execution wave) of each To-Do task, so the checklist can show where a dependency lands.
@@ -610,12 +611,9 @@ struct TaskDetailView: View {
     private var suggestionPanel: some View {
         switch suggestionState {
         case .idle:
-            if editingWorkerModel == nil {
-                Text("Atelier picks at spawn time — Opus 4.7 for refactors, Haiku for chores, Sonnet/Opus 4.6 otherwise.")
-                    .font(AtelierFont.caption)
-                    .foregroundStyle(Color.atelierInkSecondary)
-                    .padding(.top, 4)
-            }
+            // The "Auto" model chip + its tooltip already explain the default; no
+            // permanent hint needed under the strip.
+            EmptyView()
         case .loading:
             EmptyView()
         case .suggested(let model, let reason):
