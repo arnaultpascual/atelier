@@ -118,10 +118,17 @@ struct AddProjectSheet: View {
                 .overlay(RoundedRectangle(cornerRadius: AtelierCorner.control).stroke(Color.atelierDivider, lineWidth: 1))
                 .onSubmit(submit)
             if !gitDetected {
-                Label("No `.git` directory found — Atelier will scaffold the project, but you'll need to `git init` before spawning a worker (worktrees require git).",
-                      systemImage: "exclamationmark.triangle")
-                    .font(AtelierFont.caption)
-                    .foregroundStyle(Palette.warning)
+                HStack(alignment: .top, spacing: 8) {
+                    Label("No `.git` directory found — worktrees require git, so initialize a repo here before spawning workers.",
+                          systemImage: "exclamationmark.triangle")
+                        .font(AtelierFont.caption)
+                        .foregroundStyle(Palette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Button("Initialize git") { initGit() }
+                        .controlSize(.small)
+                        .disabled(isWorking)
+                }
             }
         }
     }
@@ -251,6 +258,21 @@ struct AddProjectSheet: View {
             } catch {
                 self.error = error.localizedDescription
                 isWorking = false
+            }
+        }
+    }
+
+    private func initGit() {
+        guard let url = pickedURL else { return }
+        isWorking = true
+        error = nil
+        Task {
+            defer { isWorking = false }
+            do {
+                try await GitService.initRepo(path: url.path)
+                gitDetected = FileManager.default.fileExists(atPath: url.appendingPathComponent(".git").path)
+            } catch {
+                self.error = error.localizedDescription
             }
         }
     }

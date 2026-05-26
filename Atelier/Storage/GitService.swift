@@ -344,6 +344,13 @@ enum GitService {
         guard r.success else { throw Error.commandFailed("git checkout \(branch)", stderr: r.stderr) }
     }
 
+    /// Initializes a new git repository at `path` — used when a project points at a non-git folder
+    /// (worktree-based spawning requires git).
+    static func initRepo(path: String) async throws {
+        let r = try await runGit(args: ["init"], workingDirectory: path)
+        guard r.success else { throw Error.commandFailed("git init", stderr: r.stderr) }
+    }
+
     // MARK: - Internals
 
     private struct Run {

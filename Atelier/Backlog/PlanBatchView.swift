@@ -39,7 +39,7 @@ struct PlanBatchView: View {
                         ForEach(waves, id: \.round) { wave in
                             lane(round: wave.round, tasks: wave.tasks)
                         }
-                        Text("Drag a task up or down between rounds to change which tasks it waits on. A task in round 1 runs first; dropping it into a later round makes it depend on the round above.")
+                        Text("Drag a task up or down between rounds to set what it waits on (a drop into round N depends on all of round N-1). Right-click a task to pick exact dependencies instead. Round 1 runs first.")
                             .font(AtelierFont.caption)
                             .foregroundStyle(Color.atelierInkSecondary)
                             .padding(.top, 4)
@@ -186,6 +186,50 @@ struct PlanBatchView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .atelierCard(border: Color.atelierDivider)
         .draggable(t.id)
+        .contextMenu { dependencyMenu(for: t) }
+    }
+
+    /// Precise dependency editing (the drag sets "all of round N-1"; this sets exact tasks).
+    /// Cycle-safe: tasks that already depend on `t` aren't offered.
+    @ViewBuilder
+    private func dependencyMenu(for t: AtelierTask) -> some View {
+        let unsafe = dependentsClosure(of: t.id)
+        let candidates = todo.filter { $0.id != t.id && !unsafe.contains($0.id) }
+        if candidates.isEmpty {
+            Text("No other tasks available to depend on")
+        } else {
+            Section("Depends on") {
+                ForEach(candidates) { other in
+                    Toggle(isOn: Binding(
+                        get: { t.dependsOn.contains(other.id) },
+                        set: { _ in toggleDependency(of: t, on: other.id) }
+                    )) {
+                        Text("\(other.id) · \(other.title)")
+                    }
+                }
+            }
+            if !t.dependsOn.isEmpty {
+                Divider()
+                Button("Clear dependencies", role: .destructive) { clearDependencies(of: t) }
+            }
+        }
+    }
+
+    private func toggleDependency(of t: AtelierTask, on otherId: String) {
+        var updated = t
+        if updated.dependsOn.contains(otherId) {
+            updated.dependsOn.removeAll { $0 == otherId }
+        } else {
+            updated.dependsOn.append(otherId)
+            updated.dependsOn.sort()
+        }
+        Task { try? await store.updateTask(updated) }
+    }
+
+    private func clearDependencies(of t: AtelierTask) {
+        var updated = t
+        updated.dependsOn = []
+        Task { try? await store.updateTask(updated) }
     }
 
     private var emptyState: some View {

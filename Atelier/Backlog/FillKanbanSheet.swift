@@ -30,6 +30,7 @@ struct FillKanbanSheet: View {
     @State private var brief: String = ""
     @State private var phase: Phase = .compose
     @State private var drafts: [AIAssistant.TaskDraft] = []
+    @State private var editingDraft: AIAssistant.TaskDraft?
     @State private var attachments: [URL] = []
     @State private var inspectRepo: Bool = false
     @State private var isDropTargeted = false
@@ -58,6 +59,14 @@ struct FillKanbanSheet: View {
                minHeight: 540, idealHeight: 640, maxHeight: 900)
         .background(Color.atelierBackground)
         .onDisappear { decomposeTask?.cancel() }   // never orphan the claude subprocess
+        .sheet(item: $editingDraft) { d in
+            DraftEditSheet(draft: d) { updated in
+                if let i = drafts.firstIndex(where: { $0.id == updated.id }) { drafts[i] = updated }
+                editingDraft = nil
+            } onCancel: {
+                editingDraft = nil
+            }
+        }
     }
 
     private var header: some View {
@@ -465,6 +474,17 @@ struct FillKanbanSheet: View {
                         .font(AtelierFont.captionMono)
                         .foregroundStyle(Color.atelierInkSecondary)
                 }
+                Button {
+                    editingDraft = draft
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.atelierInkSecondary)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Edit this draft before creating it")
                 Button(role: .destructive) {
                     drafts.removeAll { $0.id == draft.id }
                 } label: {
@@ -687,5 +707,87 @@ struct FillKanbanSheet: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Draft edit sheet
+
+/// Edit a Fill-kanban draft (title / description / priority / model) before it's persisted —
+/// the review step is "review & tweak", so tweaking shouldn't require persist-then-edit.
+private struct DraftEditSheet: View {
+    @State private var draft: AIAssistant.TaskDraft
+    let onSave: (AIAssistant.TaskDraft) -> Void
+    let onCancel: () -> Void
+
+    init(draft: AIAssistant.TaskDraft,
+         onSave: @escaping (AIAssistant.TaskDraft) -> Void,
+         onCancel: @escaping () -> Void) {
+        _draft = State(initialValue: draft)
+        self.onSave = onSave
+        self.onCancel = onCancel
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Edit draft")
+                .font(AtelierFont.title)
+                .foregroundStyle(Color.atelierInk)
+
+            VStack(alignment: .leading, spacing: 6) {
+                SectionLabel("TITLE")
+                TextField("Title", text: $draft.title)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    SectionLabel("PRIORITY")
+                    Picker("", selection: $draft.priority) {
+                        Text("—").tag(Optional<AtelierTask.Priority>.none)
+                        ForEach(AtelierTask.Priority.allCases, id: \.self) { p in
+                            Text(p.displayName).tag(Optional(p))
+                        }
+                    }
+                    .labelsHidden().pickerStyle(.menu)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    SectionLabel("MODEL")
+                    Picker("", selection: Binding(
+                        get: { draft.workerModel ?? "auto" },
+                        set: { draft.workerModel = $0 == "auto" ? nil : $0 }
+                    )) {
+                        Text("Auto").tag("auto")
+                        ForEach(ModelRouter.Model.allCases, id: \.rawValue) { m in
+                            Text(m.displayName).tag(m.rawValue)
+                        }
+                    }
+                    .labelsHidden().pickerStyle(.menu)
+                }
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                SectionLabel("DESCRIPTION")
+                TextEditor(text: $draft.descriptionMd)
+                    .scrollContentBackground(.hidden)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 160)
+                    .padding(8)
+                    .background(Color.atelierSurface, in: RoundedRectangle(cornerRadius: AtelierCorner.control))
+                    .overlay(RoundedRectangle(cornerRadius: AtelierCorner.control).stroke(Color.atelierDivider, lineWidth: 1))
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") { onSave(draft) }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 540, height: 480)
+        .background(Color.atelierBackground)
     }
 }
