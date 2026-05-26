@@ -25,7 +25,10 @@ final class AutopilotRun {
     var currentRound: Int = 0
     var roundsCompleted: Int = 0
     var taskPhases: [String: TaskPhase] = [:]
-    var costByTask: [String: Double] = [:]
+    var costByTask: [String: Double] = [:]              // worker chain (build + fix passes)
+    var reviewCostByTask: [String: Double] = [:]        // Opus review + conflict resolution
+    var fixPassesByTask: [String: Int] = [:]            // carried from review phase to merge phase
+    var readyToMerge: Set<String> = []                  // passed review, queued for the serial merge
     var findingsByTask: [String: [ReviewFinding]] = [:]
     var reportByTask: [String: ReviewReport] = [:]   // initial review per task, for the persisted report
     var budgetCapUsd: Double?
@@ -37,9 +40,11 @@ final class AutopilotRun {
     @ObservationIgnored var loopTask: Task<Void, Never>?
     @ObservationIgnored fileprivate var deps: FeatureBuildRunner.Deps?
 
-    /// Sum of every task's cumulative cost: build + fix passes (worker chains) plus the
-    /// Opus review and any conflict-resolution spend, all folded into `costByTask`.
-    var totalCostUsd: Double { costByTask.values.reduce(0, +) }
+    /// Sum of every task's cost: worker chains (build + fix passes) in `costByTask`,
+    /// plus Opus review and conflict-resolution spend in `reviewCostByTask`.
+    var totalCostUsd: Double {
+        costByTask.values.reduce(0, +) + reviewCostByTask.values.reduce(0, +)
+    }
 
     init(projectId: String, batchesRequested: Int, budgetCapUsd: Double?) {
         self.projectId = projectId
@@ -160,7 +165,11 @@ final class FeatureBuildRunner {
                 for t in deps.store.tasks(in: deps.project.id, status: .review)
                         .sorted(by: { integrationOrder($0) < integrationOrder($1) }) {
                     if run.status != .running { break }
-                    await reviewFixMerge(t, run: run, deps: deps)
+                    run.readyToMerge.remove(t.id)
+                    await reviewAndFix(t, run: run, deps: deps)
+                    if run.status == .running, run.readyToMerge.contains(t.id) {
+                        await mergeReviewed(t, run: run, deps: deps)
+                    }
                 }
             }
         } catch {
@@ -194,11 +203,25 @@ final class FeatureBuildRunner {
             for t in buildTasks { await t.value }
             if run.status != .running { break }
 
-            // PHASE B — integrate serially (merges share the base branch + index).
+            // PHASE B1 — review + auto-fix in parallel. Each task only touches its own
+            // worktree, so reviews/fixes are independent; same unstructured @MainActor
+            // pattern as the builds above.
+            run.readyToMerge.subtract(wave.map(\.id))
+            var reviewTasks: [Task<Void, Never>] = []
+            for task in wave {
+                if run.status != .running { break }
+                guard let latest = deps.store.taskByID(task.id), latest.status == .review else { continue }
+                reviewTasks.append(Task { @MainActor in await self.reviewAndFix(latest, run: run, deps: deps) })
+            }
+            for t in reviewTasks { await t.value }
+            if run.status != .running { break }
+
+            // PHASE B2 — merge serially (all merges share the base branch + index).
             for task in wave.sorted(by: { integrationOrder($0) < integrationOrder($1) }) {
                 if run.status != .running || overBudget(run) { break }
-                guard let latest = deps.store.taskByID(task.id), latest.status == .review else { continue }
-                await reviewFixMerge(latest, run: run, deps: deps)
+                guard run.readyToMerge.contains(task.id),
+                      let latest = deps.store.taskByID(task.id), latest.status == .review else { continue }
+                await mergeReviewed(latest, run: run, deps: deps)
             }
             run.roundsCompleted += 1
         }
@@ -231,13 +254,15 @@ final class FeatureBuildRunner {
         // On success `execute` already promoted the task to .review; Phase B picks it up.
     }
 
-    private func reviewFixMerge(_ task: AtelierTask, run: AutopilotRun, deps: Deps) async {
+    /// Review + auto-fix a finished worktree. Parallel-safe: only touches this task's own
+    /// worktree (reviews diff it read-only; fixes resume its session). On success the task is
+    /// added to `readyToMerge` for the serial merge phase; otherwise it's blocked / the run pauses.
+    private func reviewAndFix(_ task: AtelierTask, run: AutopilotRun, deps: Deps) async {
         guard let agent = try? await deps.store.agentsForTask(task.id).first,
               !agent.worktreePath.isEmpty else {
             await block(task, "no agent/worktree to review", run: run, deps: deps); return
         }
         let worktreePath = agent.worktreePath
-        let branch = agent.branch.isEmpty ? "worktree-\(task.id)" : agent.branch
 
         // Review (structured).
         run.taskPhases[task.id] = .reviewing
@@ -250,7 +275,7 @@ final class FeatureBuildRunner {
                                                           apiKey: deps.apiKey)
             run.findingsByTask[task.id] = report.findings
             run.reportByTask[task.id] = report   // the initial review = what was found pre-fix
-            run.costByTask[task.id, default: 0] += report.costUsd
+            run.reviewCostByTask[task.id, default: 0] += report.costUsd
         } catch {
             await block(task, "review failed: \(error.localizedDescription)", run: run, deps: deps); return
         }
@@ -285,7 +310,7 @@ final class FeatureBuildRunner {
                                                               baseBranch: run.baseBranch,
                                                               apiKey: deps.apiKey)
                 run.findingsByTask[task.id] = report.findings
-                run.costByTask[task.id, default: 0] += report.costUsd
+                run.reviewCostByTask[task.id, default: 0] += report.costUsd
             } catch {
                 await block(task, "re-review failed: \(error.localizedDescription)", run: run, deps: deps); return
             }
@@ -295,8 +320,22 @@ final class FeatureBuildRunner {
                         run: run, deps: deps)
             return
         }
+        // Passed review — queue for the serial merge phase.
+        run.fixPassesByTask[task.id] = pass
+        run.readyToMerge.insert(task.id)
+        run.taskPhases[task.id] = .reviewing   // holds here until B2 merges it
+    }
 
-        // Merge into base.
+    /// Merge a reviewed task's worktree into the shared base branch. MUST run serially across
+    /// tasks — every merge touches the same base branch + index.
+    private func mergeReviewed(_ task: AtelierTask, run: AutopilotRun, deps: Deps) async {
+        guard let agent = try? await deps.store.agentsForTask(task.id).first,
+              !agent.worktreePath.isEmpty else {
+            await block(task, "no worktree to merge", run: run, deps: deps); return
+        }
+        let branch = agent.branch.isEmpty ? "worktree-\(task.id)" : agent.branch
+        let pass = run.fixPassesByTask[task.id] ?? 0
+
         run.taskPhases[task.id] = .merging
         do {
             _ = try await GitService.commitWorktree(projectPath: deps.project.path,
@@ -317,7 +356,7 @@ final class FeatureBuildRunner {
                                                                           conflictFiles: files,
                                                                           taskTitle: task.title,
                                                                           apiKey: deps.apiKey)
-                run.costByTask[task.id, default: 0] += conflictCost
+                run.reviewCostByTask[task.id, default: 0] += conflictCost
                 if resolved {
                     await markMerged(task, run: run, deps: deps, outcome: "Merged after auto-resolving merge conflicts")
                 } else {
