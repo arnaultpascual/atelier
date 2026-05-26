@@ -224,6 +224,7 @@ private struct ChatRoomView: View {
     @State private var contextPath: String? = nil
     @State private var capsLoaded: Bool = false
     @State private var isDropTargeted: Bool = false
+    @State private var didCopyConversation = false
     @State private var showCreateTask = false
     @State private var ctProjectId: String = ""
     @State private var ctTitle: String = ""
@@ -379,6 +380,16 @@ private struct ChatRoomView: View {
             .buttonStyle(.plain)
             .disabled(allProjects.isEmpty)
             .help(allProjects.isEmpty ? "Add a project first to create tasks." : "Create a task in a project from this chat")
+            Button(action: copyConversation) {
+                Image(systemName: didCopyConversation ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(didCopyConversation ? Palette.success : Color.atelierInkSecondary)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(combinedMessages.isEmpty)
+            .help("Copy the whole conversation as markdown")
             viewModeToggle
             modelPicker
             if isWorking {
@@ -865,6 +876,23 @@ private struct ChatRoomView: View {
         NSPasteboard.general.setString(string, forType: .string)
     }
 
+    /// Copies the whole conversation as markdown (both sides), so the user can
+    /// paste a generated doc / answer straight out of the chat.
+    private func copyConversation() {
+        let blocks: [String] = combinedMessages.map { msg -> String in
+            let who: String = msg.role == .user ? "**You:**" : "**Claude:**"
+            return who + "\n\n" + msg.text
+        }
+        let transcript: String = blocks.joined(separator: "\n\n---\n\n")
+        guard !transcript.isEmpty else { return }
+        copyToPasteboard(transcript)
+        didCopyConversation = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.4))
+            await MainActor.run { didCopyConversation = false }
+        }
+    }
+
     /// Loads disk-persisted events from claude's JSONL the first time we
     /// open a room with prior turns. Skipped when there's an in-memory
     /// liveTurn (it already has the events).
@@ -885,18 +913,43 @@ private struct ChatRoomView: View {
 /// Chat view and the Review section's "Chat" conversation mode.
 struct ChatBubble: View {
     let message: ChatMessage
+    @State private var hover = false
+    @State private var copied = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             if message.role == .user { Spacer(minLength: 60) }
             VStack(alignment: alignment, spacing: 4) {
                 bubbleContent
-                Text(message.timestamp.formatted(date: .omitted, time: .shortened))
-                    .font(AtelierFont.captionMono)
-                    .foregroundStyle(Color.atelierInkSecondary.opacity(0.6))
-                    .padding(.horizontal, 4)
+                HStack(spacing: 6) {
+                    Text(message.timestamp.formatted(date: .omitted, time: .shortened))
+                        .font(AtelierFont.captionMono)
+                        .foregroundStyle(Color.atelierInkSecondary.opacity(0.6))
+                    if hover || copied {
+                        Button(action: copy) {
+                            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(copied ? Palette.success : Color.atelierInkSecondary)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Copy this message")
+                    }
+                }
+                .padding(.horizontal, 4)
             }
             if message.role == .assistant { Spacer(minLength: 60) }
+        }
+        .onHover { hover = $0 }
+    }
+
+    private func copy() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message.text, forType: .string)
+        copied = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.2))
+            await MainActor.run { copied = false }
         }
     }
 
