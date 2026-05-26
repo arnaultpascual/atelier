@@ -14,11 +14,13 @@ struct ProjectSettingsSheet: View {
     let onClose: () -> Void
 
     @State private var selectedTab: Tab
+    private let openToClaudeMd: Bool
 
-    init(store: AppStore, project: Project, openToPermissions: Bool = false, onClose: @escaping () -> Void) {
+    init(store: AppStore, project: Project, openToPermissions: Bool = false, openToClaudeMd: Bool = false, onClose: @escaping () -> Void) {
         self._store = Bindable(wrappedValue: store)
         self.project = project
         self.onClose = onClose
+        self.openToClaudeMd = openToClaudeMd
         _selectedTab = State(initialValue: openToPermissions ? .permissions : .general)
     }
 
@@ -46,7 +48,7 @@ struct ProjectSettingsSheet: View {
             Group {
                 switch selectedTab {
                 case .general:
-                    GeneralTab(store: store, project: project, onClose: onClose)
+                    GeneralTab(store: store, project: project, scrollToClaudeMd: openToClaudeMd, onClose: onClose)
                 case .permissions:
                     PermissionsTab(project: project)
                 }
@@ -103,6 +105,7 @@ struct ProjectSettingsSheet: View {
 private struct GeneralTab: View {
     @Bindable var store: AppStore
     let project: Project
+    var scrollToClaudeMd: Bool = false
     let onClose: () -> Void
 
     @State private var draftName: String = ""
@@ -131,11 +134,24 @@ private struct GeneralTab: View {
         VStack(alignment: .leading, spacing: 18) {
             header
             Divider().background(Color.atelierDivider).opacity(0.6)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    form
-                    Divider().background(Color.atelierDivider).opacity(0.6)
-                    claudeMdSection
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        form
+                        Divider().background(Color.atelierDivider).opacity(0.6)
+                        claudeMdSection.id("claudemd")
+                    }
+                }
+                .onAppear {
+                    guard scrollToClaudeMd else { return }
+                    // Opened via the CLAUDE.md pill — jump to that section and keep
+                    // focus off the title field.
+                    nameFocused = false
+                    DispatchQueue.main.async {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo("claudemd", anchor: .top)
+                        }
+                    }
                 }
             }
             Divider().background(Color.atelierDivider).opacity(0.6)

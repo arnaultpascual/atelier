@@ -15,6 +15,7 @@ struct BacklogPane: View {
 
     @State private var settingsProject: Project?
     @State private var settingsToPermissions = false
+    @State private var settingsToClaudeMd = false
     @State private var fillKanbanProject: Project?
     @State private var planBatchProject: Project?
 
@@ -27,6 +28,7 @@ struct BacklogPane: View {
             ProjectSettingsSheet(store: store,
                                  project: p,
                                  openToPermissions: settingsToPermissions,
+                                 openToClaudeMd: settingsToClaudeMd,
                                  onClose: { settingsProject = nil })
         }
         .sheet(item: $fillKanbanProject) { p in
@@ -62,10 +64,11 @@ struct BacklogPane: View {
                               },
                               onStopAutopilot: { force in featureRunner.stop(projectId: project.id, force: force) },
                               onResumeAutopilot: { featureRunner.resume(projectId: project.id) },
-                              onOpenApprovalSettings: { settingsToPermissions = true; settingsProject = project },
+                              onOpenApprovalSettings: { settingsToPermissions = true; settingsToClaudeMd = false; settingsProject = project },
                               onClearAutopilot: { featureRunner.clearRun(projectId: project.id) },
                               onRefresh: { _ = try? await store.importTasksFromDisk(project: project) },
-                              onSettings: { settingsToPermissions = false; settingsProject = project },
+                              onSettings: { settingsToPermissions = false; settingsToClaudeMd = false; settingsProject = project },
+                              onOpenClaudeMd: { settingsToPermissions = false; settingsToClaudeMd = true; settingsProject = project },
                               onFillKanban: { fillKanbanProject = project },
                               onPlanBatch: { planBatchProject = project })
                 KanbanBoard(store: store,
@@ -133,6 +136,7 @@ private struct ProjectHeader: View {
     let onClearAutopilot: () -> Void
     let onRefresh: () async -> Void
     let onSettings: () -> Void
+    let onOpenClaudeMd: () -> Void
     let onFillKanban: () -> Void
     let onPlanBatch: () -> Void
     @State private var refreshing = false
@@ -251,7 +255,7 @@ private struct ProjectHeader: View {
         let exists = FileManager.default.fileExists(
             atPath: URL(fileURLWithPath: project.path).appendingPathComponent("CLAUDE.md").path
         )
-        Button(action: onSettings) {
+        Button(action: onOpenClaudeMd) {
             HStack(spacing: 4) {
                 Image(systemName: exists ? "doc.text.fill" : "doc.text")
                     .font(.system(size: 9))
