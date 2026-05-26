@@ -120,10 +120,14 @@ struct AtelierCardModifier: ViewModifier {
     var fill: Color = .atelierSurface
     var border: Color = .atelierDivider
     var borderWidth: CGFloat = 1
+    /// When true, the card reads as *selected* via a soft accent fill — distinct from any
+    /// state expressed on the border (so "selected" and "running" never collide).
+    var selected: Bool = false
 
     func body(content: Content) -> some View {
         content
-            .background(fill, in: RoundedRectangle(cornerRadius: cornerRadius))
+            .background(selected ? Color.atelierAccent.opacity(0.10) : fill,
+                        in: RoundedRectangle(cornerRadius: cornerRadius))
             .overlay(RoundedRectangle(cornerRadius: cornerRadius).stroke(border, lineWidth: borderWidth))
     }
 }
@@ -133,7 +137,28 @@ extension View {
     func atelierCard(cornerRadius: CGFloat = AtelierCorner.card,
                      fill: Color = .atelierSurface,
                      border: Color = .atelierDivider,
-                     borderWidth: CGFloat = 1) -> some View {
-        modifier(AtelierCardModifier(cornerRadius: cornerRadius, fill: fill, border: border, borderWidth: borderWidth))
+                     borderWidth: CGFloat = 1,
+                     selected: Bool = false) -> some View {
+        modifier(AtelierCardModifier(cornerRadius: cornerRadius, fill: fill, border: border,
+                                     borderWidth: borderWidth, selected: selected))
+    }
+}
+
+// MARK: - Dependency chip
+
+/// Compact "depends on N" marker shown on cards so dependency structure is visible without
+/// opening the task. Quiet (ink-secondary outline) — it's metadata, not an action.
+struct DependencyChip: View {
+    let count: Int
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "arrow.triangle.branch").font(.system(size: 8))
+            Text("\(count)").font(AtelierFont.eyebrow)
+        }
+        .foregroundStyle(Color.atelierInkSecondary)
+        .padding(.horizontal, 6).padding(.vertical, 2)
+        .background(Color.atelierSurface, in: Capsule())
+        .overlay(Capsule().stroke(Color.atelierDivider, lineWidth: 1))
+        .help("Depends on \(count) task\(count == 1 ? "" : "s")")
     }
 }

@@ -506,7 +506,7 @@ private struct TaskCard: View {
                         Text(task.title)
                             .font(AtelierFont.callout)
                             .foregroundStyle(Color.atelierInk)
-                            .lineLimit(3)
+                            .lineLimit(2)
                             .multilineTextAlignment(.leading)
                         Spacer(minLength: 0)
                         if let run, !run.agent.status.isTerminal {
@@ -517,9 +517,12 @@ private struct TaskCard: View {
                     HStack(spacing: 6) {
                         Text(task.id)
                             .font(AtelierFont.eyebrow)
-                            .foregroundStyle(Color.atelierInkSecondary)
+                            .foregroundStyle(Color.atelierInkSecondary.opacity(0.7))
                         if let p = task.priority {
                             PriorityPill(priority: p)
+                        }
+                        if !task.dependsOn.isEmpty {
+                            DependencyChip(count: task.dependsOn.count)
                         }
                         if let phase = autopilotPhase {
                             AutopilotPhaseChip(phase: phase)
@@ -546,7 +549,7 @@ private struct TaskCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .atelierCard(border: borderColor, borderWidth: isSelected ? 1.5 : 1)
+        .atelierCard(border: borderColor, borderWidth: 1, selected: isSelected)
         .overlay(alignment: .topTrailing) {
             if canSpawn && hover {
                 spawnButton
@@ -601,7 +604,8 @@ private struct TaskCard: View {
     }
 
     private var borderColor: Color {
-        if isSelected { return Color.atelierAccent.opacity(0.7) }
+        // Selection is shown via a soft accent fill (see `.atelierCard(selected:)`), and a
+        // running worker via the left strip — so the border only carries hover emphasis.
         if hover { return Color.atelierDivider }
         return Color.atelierDivider.opacity(0.5)
     }

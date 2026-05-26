@@ -553,10 +553,10 @@ struct TaskDetailView: View {
                 Text(suggestionState == .loading ? "Asking Haiku…" : "Suggest")
                     .font(AtelierFont.caption.weight(.medium))
             }
-            .foregroundStyle(Color.atelierAccent)
+            .foregroundStyle(Color.atelierInkSecondary)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(Color.atelierAccentSoft.opacity(0.5), in: Capsule())
+            .overlay(Capsule().stroke(Color.atelierDivider, lineWidth: 1))
         }
         .buttonStyle(.plain)
         .disabled(suggestionState == .loading)
@@ -685,10 +685,10 @@ struct TaskDetailView: View {
                 Text(improveState == .loading ? "Improving…" : "Improve")
                     .font(AtelierFont.caption.weight(.medium))
             }
-            .foregroundStyle(Color.atelierAccent)
+            .foregroundStyle(Color.atelierInkSecondary)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(Color.atelierAccentSoft.opacity(0.5), in: Capsule())
+            .overlay(Capsule().stroke(Color.atelierDivider, lineWidth: 1))
         }
         .buttonStyle(.plain)
         .disabled(improveState == .loading || editingDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
