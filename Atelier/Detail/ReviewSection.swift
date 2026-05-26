@@ -288,9 +288,12 @@ struct ReviewSection: View {
             }
             .padding(.top, 4)
         } else if let stat = diffStat, stat.isEmpty {
+            let worktreeGone = !FileManager.default.fileExists(atPath: worktreePath)
             HStack(spacing: 5) {
-                Image(systemName: "minus.circle").font(.system(size: 10))
-                Text("No code changes vs. HEAD — pure analysis run.")
+                Image(systemName: worktreeGone ? "checkmark.circle" : "minus.circle").font(.system(size: 10))
+                Text(worktreeGone
+                     ? "Worktree merged & removed — its changes are in your branch, so there's nothing left to diff."
+                     : "No code changes vs. HEAD — pure analysis run.")
                     .font(AtelierFont.caption)
                     .foregroundStyle(Color.atelierInkSecondary)
             }
