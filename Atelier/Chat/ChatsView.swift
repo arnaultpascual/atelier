@@ -913,7 +913,6 @@ private struct ChatRoomView: View {
 /// Chat view and the Review section's "Chat" conversation mode.
 struct ChatBubble: View {
     let message: ChatMessage
-    @State private var hover = false
     @State private var copied = false
 
     var body: some View {
@@ -925,22 +924,21 @@ struct ChatBubble: View {
                     Text(message.timestamp.formatted(date: .omitted, time: .shortened))
                         .font(AtelierFont.captionMono)
                         .foregroundStyle(Color.atelierInkSecondary.opacity(0.6))
-                    if hover || copied {
-                        Button(action: copy) {
-                            Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(copied ? Palette.success : Color.atelierInkSecondary)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("Copy this message")
+                    // Always present (no hover gate) so it doesn't slip away as
+                    // you move to click it.
+                    Button(action: copy) {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(copied ? Palette.success : Color.atelierInkSecondary.opacity(0.7))
+                            .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .help("Copy this message")
                 }
                 .padding(.horizontal, 4)
             }
             if message.role == .assistant { Spacer(minLength: 60) }
         }
-        .onHover { hover = $0 }
     }
 
     private func copy() {
