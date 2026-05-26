@@ -239,7 +239,7 @@ struct TaskAgentView: View {
                 Button {
                     spawner.dismiss(taskId: task.id)
                 } label: {
-                    Text("Done")
+                    Text("Close")
                         .font(.system(.callout).weight(.semibold))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 6)
@@ -248,7 +248,7 @@ struct TaskAgentView: View {
                 }
                 .buttonStyle(.plain)
                 .fixedSize()
-                .help("Dismiss this run — the inspector goes back to the task editor.")
+                .help("Close this live log — the inspector goes back to the task editor. (Doesn't change the task's status.)")
             }
         }
     }

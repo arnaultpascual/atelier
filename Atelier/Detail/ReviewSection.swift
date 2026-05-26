@@ -24,6 +24,8 @@ struct ReviewSection: View {
     @State private var diskEvents: [StreamEvent] = []
     @State private var diskEventsLoaded: Bool = false
     @State private var presentingReview: Bool = false
+    @State private var merging: Bool = false
+    @State private var mergeError: String?
 
     private struct PreviewItem: Identifiable, Equatable {
         let id = UUID()
@@ -44,6 +46,9 @@ struct ReviewSection: View {
             header
             conversationPanel
             diffPanel
+            if let mergeError {
+                CalloutBanner(.danger, mergeError)
+            }
             actionsRow
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -78,11 +83,13 @@ struct ReviewSection: View {
                 .frame(minWidth: 820, idealWidth: 1000, maxWidth: 1400,
                        minHeight: 620, idealHeight: 820, maxHeight: 1200)
         }
-        .alert("Discard worktree?", isPresented: $presentingDiscard) {
+        .confirmationDialog("Discard the worktree for this task?", isPresented: $presentingDiscard, titleVisibility: .visible) {
+            Button("Discard & move to To Do", role: .destructive) { Task { await discardWorktree(then: .toDo) } }
+            Button("Discard & delete task", role: .destructive) { Task { await discardWorktree(then: .delete) } }
+            Button("Discard only (stay in Review)") { Task { await discardWorktree(then: .stay) } }
             Button("Cancel", role: .cancel) { }
-            Button("Discard", role: .destructive) { Task { await discardWorktree() } }
         } message: {
-            Text("Removes the `\(branch)` worktree and deletes the branch. The task itself stays in Review — change its status manually if you want.")
+            Text("Removes the \(branch) worktree and branch. Choose what happens to the task itself.")
         }
     }
 
@@ -352,10 +359,14 @@ struct ReviewSection: View {
                 .help("Resume this session and keep talking with claude.")
             }
 
-            Button(action: markDone) {
+            Button(action: mergeInApp) {
                 HStack(spacing: 4) {
-                    Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold))
-                    Text("Mark as Done").font(.system(.callout).weight(.semibold))
+                    if merging {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.triangle.merge").font(.system(size: 10, weight: .semibold))
+                    }
+                    Text(merging ? "Merging…" : "Merge").font(.system(.callout).weight(.semibold))
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 6)
@@ -364,7 +375,22 @@ struct ReviewSection: View {
             }
             .buttonStyle(.plain)
             .fixedSize()
-            .help("Once you've merged the branch (or decided not to), move the task to Done.")
+            .disabled(merging)
+            .help("Merge worktree-\(task.id) into your current branch (--no-ff), mark the task Done, and remove the worktree. Conflicts abort cleanly so you can resolve by hand.")
+
+            Button(action: markDone) {
+                Text("Mark as Done")
+                    .font(.system(.callout).weight(.medium))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .foregroundStyle(Color.atelierInkSecondary)
+                    .background(Color.atelierSurface, in: RoundedRectangle(cornerRadius: AtelierCorner.control))
+                    .overlay(RoundedRectangle(cornerRadius: AtelierCorner.control).stroke(Color.atelierDivider, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .disabled(merging)
+            .help("Move to Done without an in-app merge — e.g. if you merged manually or won't merge.")
         }
     }
 
@@ -532,9 +558,42 @@ struct ReviewSection: View {
         Task { try? await store.updateTaskStatus(task, to: .done) }
     }
 
-    private func discardWorktree() async {
+    /// Merge the task's worktree branch into the project's current branch with `--no-ff` (the same
+    /// plumbing autopilot uses), then mark the task Done and remove the worktree. A conflict aborts
+    /// cleanly and points the user at the copyable command to resolve by hand.
+    private func mergeInApp() {
+        merging = true
+        mergeError = nil
+        Task {
+            defer { merging = false }
+            do {
+                let base = try await GitService.currentBranch(projectPath: project.path)
+                let result = try await GitService.merge(into: base, branch: branch, projectPath: project.path)
+                switch result {
+                case .clean, .upToDate:
+                    try? await GitService.removeWorktree(projectPath: project.path, taskId: task.id, force: false)
+                    try? await store.updateTaskStatus(task, to: .done)
+                case .conflict(let files):
+                    try? await GitService.abortMerge(projectPath: project.path)
+                    let names = files.prefix(3).joined(separator: ", ")
+                    mergeError = "Merge has conflicts in \(files.count) file\(files.count == 1 ? "" : "s") (\(names)\(files.count > 3 ? "…" : "")). Aborted to keep your tree clean — use the command above to merge and resolve them by hand."
+                }
+            } catch {
+                mergeError = error.localizedDescription
+            }
+        }
+    }
+
+    private enum DiscardOutcome { case stay, toDo, delete }
+
+    private func discardWorktree(then outcome: DiscardOutcome) async {
         do {
             try await GitService.removeWorktree(projectPath: project.path, taskId: task.id, force: true)
+            switch outcome {
+            case .stay: break
+            case .toDo: try? await store.updateTaskStatus(task, to: .toDo)
+            case .delete: try? await store.deleteTask(task)
+            }
         } catch {
             await MainActor.run {
                 diffError = error.localizedDescription
