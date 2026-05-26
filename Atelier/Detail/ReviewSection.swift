@@ -26,6 +26,9 @@ struct ReviewSection: View {
     @State private var presentingReview: Bool = false
     @State private var merging: Bool = false
     @State private var mergeError: String?
+    @State private var presentingProtectedMerge = false
+    @State private var pendingBase: String = ""
+    @State private var newBranchName: String = ""
 
     private struct PreviewItem: Identifiable, Equatable {
         let id = UUID()
@@ -90,6 +93,14 @@ struct ReviewSection: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Removes the \(branch) worktree and branch. Choose what happens to the task itself.")
+        }
+        .alert("Merge onto \(pendingBase)?", isPresented: $presentingProtectedMerge) {
+            TextField("new branch name", text: $newBranchName)
+            Button("Create branch & merge") { createBranchAndMerge() }
+            Button("Merge onto \(pendingBase) anyway", role: .destructive) { mergeOntoBaseAnyway() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("You're on “\(pendingBase)”, a protected branch. Recommended: create a new branch off it and merge the task there, keeping \(pendingBase) clean.")
         }
     }
 
@@ -558,30 +569,72 @@ struct ReviewSection: View {
         Task { try? await store.updateTaskStatus(task, to: .done) }
     }
 
+    private static let protectedBranches: Set<String> = ["main", "master", "develop", "development", "trunk", "release"]
+
     /// Merge the task's worktree branch into the project's current branch with `--no-ff` (the same
-    /// plumbing autopilot uses), then mark the task Done and remove the worktree. A conflict aborts
-    /// cleanly and points the user at the copyable command to resolve by hand.
+    /// plumbing autopilot uses), then mark the task Done and remove the worktree. If the current
+    /// branch is protected (main / develop / …), it does NOT merge — it offers to create a feature
+    /// branch first. A conflict aborts cleanly and points the user at the copyable command.
     private func mergeInApp() {
         merging = true
         mergeError = nil
         Task {
-            defer { merging = false }
             do {
                 let base = try await GitService.currentBranch(projectPath: project.path)
-                let result = try await GitService.merge(into: base, branch: branch, projectPath: project.path)
-                switch result {
-                case .clean, .upToDate:
-                    try? await GitService.removeWorktree(projectPath: project.path, taskId: task.id, force: false)
-                    try? await store.updateTaskStatus(task, to: .done)
-                case .conflict(let files):
-                    try? await GitService.abortMerge(projectPath: project.path)
-                    let names = files.prefix(3).joined(separator: ", ")
-                    mergeError = "Merge has conflicts in \(files.count) file\(files.count == 1 ? "" : "s") (\(names)\(files.count > 3 ? "…" : "")). Aborted to keep your tree clean — use the command above to merge and resolve them by hand."
+                if Self.protectedBranches.contains(base.lowercased()) {
+                    pendingBase = base
+                    if newBranchName.isEmpty { newBranchName = "feature/\(BacklogMD.slugify(task.title))" }
+                    merging = false
+                    presentingProtectedMerge = true
+                    return
                 }
+                await performMerge(into: base)
             } catch {
                 mergeError = error.localizedDescription
+                merging = false
             }
         }
+    }
+
+    /// Create `newBranchName` off the current (protected) branch, then merge the task onto it.
+    private func createBranchAndMerge() {
+        let name = newBranchName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        merging = true
+        mergeError = nil
+        Task {
+            do {
+                try await GitService.createIntegrationBranch(projectPath: project.path, branch: name)
+                await performMerge(into: name)
+            } catch {
+                mergeError = error.localizedDescription
+                merging = false
+            }
+        }
+    }
+
+    private func mergeOntoBaseAnyway() {
+        merging = true
+        mergeError = nil
+        Task { await performMerge(into: pendingBase) }
+    }
+
+    private func performMerge(into base: String) async {
+        do {
+            let result = try await GitService.merge(into: base, branch: branch, projectPath: project.path)
+            switch result {
+            case .clean, .upToDate:
+                try? await GitService.removeWorktree(projectPath: project.path, taskId: task.id, force: false)
+                try? await store.updateTaskStatus(task, to: .done)
+            case .conflict(let files):
+                try? await GitService.abortMerge(projectPath: project.path)
+                let names = files.prefix(3).joined(separator: ", ")
+                mergeError = "Merge has conflicts in \(files.count) file\(files.count == 1 ? "" : "s") (\(names)\(files.count > 3 ? "…" : "")). Aborted to keep your tree clean — use the command above to merge and resolve them by hand."
+            }
+        } catch {
+            mergeError = error.localizedDescription
+        }
+        merging = false
     }
 
     private enum DiscardOutcome { case stay, toDo, delete }
