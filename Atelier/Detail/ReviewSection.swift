@@ -404,7 +404,7 @@ struct ReviewSection: View {
                     .font(.system(size: 16))
                     .foregroundStyle(Color.atelierAccent)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Opus 4.7 code review")
+                    Text("Opus 4.8 code review")
                         .font(AtelierFont.callout.weight(.semibold))
                         .foregroundStyle(Color.atelierInk)
                     Text("Reads the diff and changed files, then writes a PR-style review — summary, risks, tests, and a merge verdict.")
@@ -473,7 +473,7 @@ struct ReviewSection: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.mini)
-                Text("Opus 4.7 reviewing…")
+                Text("Opus 4.8 reviewing…")
                     .font(AtelierFont.captionMono)
                     .foregroundStyle(Color.atelierInkSecondary)
                 Spacer(minLength: 0)

@@ -165,6 +165,9 @@ struct AddProjectSheet: View {
 
     private func modelLabel(_ raw: String) -> String {
         switch raw {
+        case "claude-opus-4-8": return "Opus 4.8"
+        case "claude-opus-4-8[1m]": return "Opus 4.8 (1M)"
+        case "claude-opus-4-7[1m]": return "Opus 4.7 (1M)"
         case "claude-opus-4-7": return "Opus 4.7"
         case "claude-opus-4-6": return "Opus 4.6"
         case "claude-sonnet-4-6": return "Sonnet 4.6"

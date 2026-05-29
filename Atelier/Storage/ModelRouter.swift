@@ -13,20 +13,27 @@ import Foundation
 /// automatically. Users can also click "Suggest" in the task detail to pre-bake a model.
 enum ModelRouter {
     enum Model: String, CaseIterable, Sendable {
-        case opus47 = "claude-opus-4-7"
-        case opus46 = "claude-opus-4-6"
+        case opus48 = "claude-opus-4-8"
+        case opus48_1m = "claude-opus-4-8[1m]"
+        case opus47_1m = "claude-opus-4-7[1m]"
         case sonnet46 = "claude-sonnet-4-6"
         case haiku45 = "claude-haiku-4-5-20251001"
 
         var displayName: String {
             switch self {
-            case .opus47: return "Opus 4.7"
-            case .opus46: return "Opus 4.6"
+            case .opus48: return "Opus 4.8"
+            case .opus48_1m: return "Opus 4.8 (1M)"
+            case .opus47_1m: return "Opus 4.7 (1M)"
             case .sonnet46: return "Sonnet 4.6"
             case .haiku45: return "Haiku 4.5"
             }
         }
     }
+
+    /// The current best Opus — used for auto-routing "deep work" and for Atelier's own
+    /// Opus calls (autopilot review, brief decompose, conflict resolver, on-demand review).
+    /// Deliberately the non-1M id: those calls read a bounded worktree, so 200K is plenty.
+    static let latestOpus = Model.opus48.rawValue
 
     struct Suggestion: Sendable {
         let model: Model
@@ -41,8 +48,8 @@ enum ModelRouter {
         let trivialLabels: Set<String> = ["simple", "chore", "rename", "docs", "doc", "typo"]
 
         if !labels.isDisjoint(with: heavyLabels) {
-            return .init(model: .opus47,
-                         reason: "Labels suggest deep work (refactor / architecture / perf) — Opus 4.7 for depth.")
+            return .init(model: .opus48,
+                         reason: "Labels suggest deep work (refactor / architecture / perf) — Opus 4.8 for depth.")
         }
         if !labels.isDisjoint(with: trivialLabels) {
             return .init(model: .haiku45,
@@ -50,9 +57,10 @@ enum ModelRouter {
         }
         let descLen = task.descriptionMd?.count ?? 0
         if descLen > 1500 || task.dependsOn.count > 2 {
-            return .init(model: .opus46,
-                         reason: "Long description or multi-step task (\(descLen) chars, \(task.dependsOn.count) deps) — Opus 4.6 balances depth and cost.")
+            return .init(model: .opus48,
+                         reason: "Long or multi-step task (\(descLen) chars, \(task.dependsOn.count) deps) — Opus 4.8 for depth.")
         }
+        // 1M variants are never auto-routed — they're a manual, premium opt-in.
         return .init(model: .sonnet46,
                      reason: "Standard feature work — Sonnet 4.6 covers most cases.")
     }

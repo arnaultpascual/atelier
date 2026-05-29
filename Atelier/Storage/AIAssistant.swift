@@ -326,7 +326,7 @@ enum AIAssistant {
         var dependsOnRefs: [String] = []   // refs of tasks this one needs done first
     }
 
-    /// Opus 4.7 decomposer. Takes a free-form brief / spec / dump and emits
+    /// Opus 4.8 decomposer. Takes a free-form brief / spec / dump and emits
     /// a flat list of well-formed task drafts. The model is asked to:
     ///   - chunk so each task fits a single Claude Code worker spawn,
     ///   - pick a priority + labels + suggested model from a fixed catalog,
@@ -428,7 +428,7 @@ enum AIAssistant {
         - labels: lowercase, ≤ 3, from profile suggestions when relevant.
         - depends_on: ids this task needs done first ([] if independent).
         - suggested_model: one of
-            claude-opus-4-7              (refactors / multi-file / architectural / ambiguous)
+            claude-opus-4-8              (refactors / multi-file / architectural / ambiguous)
             claude-sonnet-4-6            (default for feature work)
             claude-haiku-4-5-20251001    (small chores / docs / mechanical edits)
 
@@ -460,14 +460,14 @@ enum AIAssistant {
         let raw: String
         if att.images.isEmpty && repoPath == nil {
             raw = try await askJSON(prompt: prompt,
-                                    model: "claude-opus-4-7",
+                                    model: ModelRouter.latestOpus,
                                     maxTurns: turns,
                                     apiKey: apiKey,
                                     repoPath: repoPath)
         } else {
             raw = try await askJSONStreaming(promptText: prompt,
                                              imageBlocks: att.images,
-                                             model: "claude-opus-4-7",
+                                             model: ModelRouter.latestOpus,
                                              maxTurns: turns,
                                              apiKey: apiKey,
                                              repoPath: repoPath,
@@ -972,8 +972,9 @@ enum AIAssistant {
         You are the model router for Atelier, a macOS IDE that orchestrates Claude Code workers.
 
         Given a coding task, pick the SINGLE best Claude model from this list:
-        - claude-opus-4-7    — deep refactors, complex architecture work, performance investigations. Most capable, most expensive.
-        - claude-opus-4-6    — long multi-step features, large surface area, or when you need a strong reasoner without the latest tokenizer cost.
+        - claude-opus-4-8    — newest, most capable. Deep refactors, complex architecture, performance work. Most expensive.
+        - claude-opus-4-8[1m] — Opus 4.8 with a 1M-token context, for a task spanning a very large or many-file surface. Premium pricing — only when the context genuinely needs it.
+        - claude-opus-4-7[1m] — previous Opus with a 1M-token context. Same premium caveat.
         - claude-sonnet-4-6  — default for typical feature work. Best perf/$ ratio.
         - claude-haiku-4-5-20251001 — simple chores, renames, docs edits, trivial tweaks. Fast and very cheap.
 
@@ -986,10 +987,12 @@ enum AIAssistant {
         \(descPreview)
         \"\"\"
 
+        Prefer the non-1M ids unless the task clearly needs a huge multi-file context.
+
         Respond with EXACTLY one line of JSON, no prose, no markdown fences:
         {"model":"<id>","reason":"<one short sentence — under 120 chars>"}
 
-        The "model" field MUST be one of the four ids above, verbatim.
+        The "model" field MUST be one of the ids above, verbatim (include the [1m] suffix if chosen).
         """
 
         let raw = try await ask(prompt: prompt, apiKey: apiKey)
@@ -1015,7 +1018,7 @@ enum AIAssistant {
 
     // MARK: - Autopilot: structured review
 
-    /// Opus 4.7 review of a finished worktree, emitting a machine-readable `ReviewReport`
+    /// Opus 4.8 review of a finished worktree, emitting a machine-readable `ReviewReport`
     /// (per-finding severity + a verdict) so the autopilot can auto-apply ONLY critical/major
     /// fixes. Runs read-capable in the worktree (it diffs against `baseBranch`). Throws on an
     /// empty/unparseable response so the caller blocks rather than merging an unknown review.
@@ -1058,7 +1061,7 @@ enum AIAssistant {
         strict about critical/major (those get auto-fixed); be lenient about minor/cosmetic.
         """
         let (raw, cost) = try await askJSONWithCost(prompt: prompt,
-                                                    model: "claude-opus-4-7",
+                                                    model: ModelRouter.latestOpus,
                                                     maxTurns: 25,
                                                     apiKey: apiKey,
                                                     repoPath: worktreePath)
@@ -1127,7 +1130,7 @@ enum AIAssistant {
         """
         // We don't care about the model's text — the git state is the source of truth.
         let cost = (try? await askJSONWithCost(prompt: prompt,
-                                               model: "claude-opus-4-7",
+                                               model: ModelRouter.latestOpus,
                                                maxTurns: 30,
                                                apiKey: apiKey,
                                                repoPath: projectPath))?.costUsd ?? 0

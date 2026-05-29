@@ -423,7 +423,7 @@ private struct AutopilotReviewCard: View {
                 }
                 Divider().background(Color.atelierDivider.opacity(0.5))
                 HStack(spacing: 10) {
-                    Label("Opus 4.7", systemImage: "cpu")
+                    Label("Opus 4.8", systemImage: "cpu")
                         .font(AtelierFont.captionMono)
                         .foregroundStyle(Color.atelierInkSecondary)
                     Spacer()

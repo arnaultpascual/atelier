@@ -16,7 +16,7 @@ import UniformTypeIdentifiers
     func reset() { lines = [] }
 }
 
-/// "Fill kanban" flow. User pastes a brief or spec, Opus 4.7 decomposes it
+/// "Fill kanban" flow. User pastes a brief or spec, Opus 4.8 decomposes it
 /// into task drafts, user reviews / tweaks / deletes individual ones, then
 /// hits "Create all" to persist.
 ///
@@ -77,7 +77,7 @@ struct FillKanbanSheet: View {
                 Text("Fill kanban")
                     .font(AtelierFont.title)
                     .foregroundStyle(Color.atelierInk)
-                Text("\(project.name) · Opus 4.7 decomposes a brief into kanban-ready tasks.")
+                Text("\(project.name) · Opus 4.8 decomposes a brief into kanban-ready tasks.")
                     .font(AtelierFont.caption)
                     .foregroundStyle(Color.atelierInkSecondary)
             }
@@ -323,7 +323,7 @@ struct FillKanbanSheet: View {
         VStack(spacing: 14) {
             Spacer()
             ProgressView().controlSize(.large)
-            Text(inspectRepo ? "Opus 4.7 is reading your repo, then decomposing…" : "Opus 4.7 is decomposing your brief…")
+            Text(inspectRepo ? "Opus 4.8 is reading your repo, then decomposing…" : "Opus 4.8 is decomposing your brief…")
                 .font(AtelierFont.callout)
                 .foregroundStyle(Color.atelierInk)
             Text(inspectRepo
@@ -558,7 +558,7 @@ struct FillKanbanSheet: View {
         switch phase {
         case .compose:
             HStack {
-                Text("Opus 4.7")
+                Text("Opus 4.8")
                     .font(AtelierFont.captionMono)
                     .foregroundStyle(Color.atelierInkSecondary)
                 Spacer()

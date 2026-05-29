@@ -39,7 +39,7 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
             id: "swift-apple",
             name: "Swift / Apple platforms",
             iconSystemName: "swift",
-            defaultModel: "claude-opus-4-7",
+            defaultModel: ModelRouter.latestOpus,
             suggestedLabels: ["ios", "macos", "swiftui"],
             description: "Detected via Package.swift, *.xcodeproj, or *.xcworkspace.",
             defaultRules: baseReadOnlyRules + [
@@ -88,7 +88,7 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
             id: "rust",
             name: "Rust",
             iconSystemName: "gearshape.2",
-            defaultModel: "claude-opus-4-7",
+            defaultModel: ModelRouter.latestOpus,
             suggestedLabels: ["rust", "systems"],
             description: "Cargo.toml at the project root.",
             defaultRules: baseReadOnlyRules + [
@@ -111,7 +111,7 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
             id: "android-kotlin",
             name: "Android / Kotlin",
             iconSystemName: "smartphone",
-            defaultModel: "claude-opus-4-7",
+            defaultModel: ModelRouter.latestOpus,
             suggestedLabels: ["android", "kotlin", "compose"],
             description: "build.gradle.kts / settings.gradle.kts / AndroidManifest.xml.",
             defaultRules: baseReadOnlyRules + [

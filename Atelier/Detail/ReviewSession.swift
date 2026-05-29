@@ -4,7 +4,7 @@ import Observation
 import os
 
 /// Drives the inline "Opus review" tab in `ReviewSection`. Spawns a read-only
-/// Opus 4.7 worker that diffs the task's worktree against the base branch and
+/// Opus 4.8 worker that diffs the task's worktree against the base branch and
 /// streams back a PR-style markdown review (summary / risks / tests / verdict).
 ///
 /// Read-only by design: it routes through `WorkerRunner.runUngated` (claude's
@@ -49,7 +49,7 @@ final class ReviewSession {
         let runner = WorkerRunner()
         let invocation = WorkerRunner.Invocation(
             prompt: prompt,
-            model: "claude-opus-4-7",
+            model: ModelRouter.latestOpus,
             apiKey: APIKeyResolver.resolve(),
             agentId: UUID(),
             settingsPath: "",                  // see below

@@ -206,7 +206,7 @@ private struct ProjectHeader: View {
                     .overlay(Capsule().stroke(Color.atelierDivider, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
-                .help("Decompose a brief into kanban tasks with Opus 4.7.")
+                .help("Decompose a brief into kanban tasks with Opus 4.8.")
                 Button(action: onSettings) {
                     Image(systemName: "gearshape")
                         .font(.system(size: 12, weight: .medium))
