@@ -7,7 +7,7 @@
 ![Swift 6](https://img.shields.io/badge/Swift-6.0-orange.svg)
 
 > [!WARNING]
-> **Alpha software.** Atelier is at `v1.0.0-alpha.1` — a lot works well, but expect rough edges: some features are still incomplete or not perfectly polished, and behaviour may change between releases.
+> **Alpha software.** Atelier is at `v1.0.0-alpha.3` — a lot works well, but expect rough edges: some features are still incomplete or not perfectly polished, and behaviour may change between releases.
 >
 > **Autopilot burns tokens.** The autonomous *Auto mode* builds, reviews, fixes, and merges whole rounds of work unattended — that's a lot of Claude calls. We recommend a **Max (5×) plan or higher**, or be ready to spend a fair amount of API credit. Start with 1–2 batches and set a spend cap. (See [Autopilot](#autopilot) below.)
 >
@@ -15,9 +15,7 @@
 
 Atelier turns Claude Code from a single terminal session into a workshop: you keep a Kanban backlog of tasks, dispatch agents to work them in parallel, watch each one stream its reasoning and tool calls in real time, approve or deny the actions you care about, then review the resulting git diff before anything touches your main branch.
 
-<!-- Drop a screenshot or screen recording here once you have one:
-<p align="center"><img src="docs/screenshot.png" width="900" alt="Atelier"></p>
--->
+<p align="center"><img src="docs/screenshot.png" width="900" alt="Atelier — a Kanban board of tasks grouped into autopilot-ready execution rounds"></p>
 
 ## Why
 
@@ -31,7 +29,7 @@ The `claude` CLI is excellent at one task in one place. But real work is several
 
 - **Workspaces & projects** — group your repositories; Atelier detects each project's stack (Swift/Apple, Next.js, Node, Python, Rust, Go, Android/Kotlin, docs).
 - **Kanban backlog** — tasks live as Markdown files in `<repo>/backlog/tasks/*.md` (the disk is the source of truth; the database is just an index). Five columns: To Do → In Progress → Review → Done → Blocked.
-- **AI task decomposition** — paste a brief and let Opus 4.7 break it into dependency-aware task drafts, optionally after inspecting the repository. Review the drafts before they land.
+- **AI task decomposition** — paste a brief and let Opus 4.8 break it into dependency-aware task drafts, optionally after inspecting the repository. Review the drafts before they land.
 - **Execution waves** — tasks are grouped by dependency depth so you can batch-spawn a whole round of work that's unblocked right now.
 - **Parallel agents** — each spawn launches a `claude` subprocess in its worktree and streams the full NDJSON timeline (assistant text, tool calls, results, cost) into a live inspector.
 - **Swarm view** — a single dashboard of every live and recently-finished agent.
@@ -45,12 +43,29 @@ The `claude` CLI is excellent at one task in one place. But real work is several
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how it all fits together.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/fill-kanban.png" width="820" alt="Fill kanban — Opus decomposes a brief into dependency-aware task drafts"><br>
+  <em><strong>Fill kanban</strong> — paste a brief and Opus decomposes it into dependency-aware, reviewable task drafts, grouped into execution rounds.</em>
+</p>
+
+<p align="center">
+  <img src="docs/plan-the-batch.png" width="820" alt="Plan the batch — arrange tasks into execution rounds and launch Autopilot"><br>
+  <em><strong>Plan the batch</strong> — drag tasks between rounds to set what waits on what, set a spend cap, and hand the whole batch to Autopilot.</em>
+</p>
+
+<p align="center">
+  <img src="docs/autopilot.png" width="820" alt="Autopilot running — a round of tasks building in parallel while an earlier one is already merged"><br>
+  <em><strong>Autopilot</strong> — a whole round builds in parallel; each task is Opus-reviewed, only critical/major fixes are auto-applied, then it's merged into a throwaway branch. Here round 2's six tasks build at once while round 1 is already merged.</em>
+</p>
+
 ## Autopilot
 
 Autopilot runs your backlog hands-off for up to *N* batches. Each batch:
 
 1. **Builds** every unblocked task in the current round in parallel, each in its own worktree.
-2. **Reviews** every finished task with a structured Opus 4.7 pass (a verdict plus findings tagged by severity).
+2. **Reviews** every finished task with a structured Opus 4.8 pass (a verdict plus findings tagged by severity).
 3. **Fixes** only *critical / major* findings — capped at two passes — by resuming that worker. Minor and cosmetic nits are deliberately left alone.
 4. **Merges** the worktree into a throwaway integration branch with `git merge --no-ff`, calling in a dedicated worker to resolve conflicts when they happen.
 5. **Advances** to the next round and repeats until *N* batches are done.
