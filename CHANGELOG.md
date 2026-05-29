@@ -4,6 +4,24 @@ All notable changes to Atelier are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha.3] — 2026-05-27
+
+Adds **Claude Opus 4.8** and 1M-context model variants.
+
+### Added
+- **Opus 4.8** is the new default Opus — the model router's "deep work" pick and Atelier's own
+  Opus calls (autopilot review, brief decomposition, conflict resolution, on-demand review) use it.
+- **1M-context variants** — *Opus 4.8 (1M)* and *Opus 4.7 (1M)* are selectable in every model
+  picker (task, chat, quick spawn, project default). Enabled via the `[1m]` model suffix; a
+  premium, manual opt-in (never auto-routed). The "Suggest" router knows them and prefers the
+  non-1M ids unless a task needs a very large context.
+
+### Changed
+- The model list is trimmed to **Opus 4.8 · Opus 4.8 (1M) · Opus 4.7 (1M) · Sonnet 4.6 · Haiku
+  4.5** (dropped Opus 4.6 and plain 4.7). Tasks/projects still pinned to an older id keep working.
+
+[1.0.0-alpha.3]: https://github.com/arnaultpascual/atelier/releases/tag/v1.0.0-alpha.3
+
 ## [1.0.0-alpha.2] — 2026-05-27
 
 A design + flow overhaul on top of the first alpha: the reused task-detail card is reworked for
