@@ -27,6 +27,20 @@ struct FillKanbanSheet: View {
     let project: Project
     let onClose: () -> Void
 
+    init(store: AppStore,
+         project: Project,
+         initialBrief: String? = nil,
+         initialAttachments: [URL] = [],
+         initialInspectRepo: Bool = false,
+         onClose: @escaping () -> Void) {
+        self._store = Bindable(wrappedValue: store)
+        self.project = project
+        self.onClose = onClose
+        _brief = State(initialValue: initialBrief ?? "")
+        _attachments = State(initialValue: initialAttachments)
+        _inspectRepo = State(initialValue: initialInspectRepo)
+    }
+
     @State private var brief: String = ""
     @State private var phase: Phase = .compose
     @State private var drafts: [AIAssistant.TaskDraft] = []

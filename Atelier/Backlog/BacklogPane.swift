@@ -10,6 +10,7 @@ struct BacklogPane: View {
     @Bindable var server: ApprovalServer
     @Bindable var approvalQueue: ApprovalQueue
     @Bindable var featureRunner: FeatureBuildRunner
+    @Bindable var chatSpawner: ChatSpawner
     let selectedProjectID: String?
     @Binding var selectedTaskID: String?
 
@@ -17,6 +18,8 @@ struct BacklogPane: View {
     @State private var settingsToPermissions = false
     @State private var settingsToClaudeMd = false
     @State private var fillKanbanProject: Project?
+    @State private var fillFromBrief: BriefHandoff?
+    @State private var preparePromptProject: Project?
     @State private var planBatchProject: Project?
 
     var body: some View {
@@ -35,6 +38,28 @@ struct BacklogPane: View {
             FillKanbanSheet(store: store,
                             project: p,
                             onClose: { fillKanbanProject = nil })
+        }
+        .sheet(item: $preparePromptProject) { p in
+            PreparePromptView(store: store,
+                              chatSpawner: chatSpawner,
+                              project: p,
+                              onSendToFillKanban: { brief, atts, inspect in
+                                  preparePromptProject = nil
+                                  // Present the seeded Fill Kanban after the prepare sheet dismisses.
+                                  DispatchQueue.main.async {
+                                      fillFromBrief = BriefHandoff(project: p, brief: brief,
+                                                                   attachments: atts, inspectRepo: inspect)
+                                  }
+                              },
+                              onClose: { preparePromptProject = nil })
+        }
+        .sheet(item: $fillFromBrief) { h in
+            FillKanbanSheet(store: store,
+                            project: h.project,
+                            initialBrief: h.brief,
+                            initialAttachments: h.attachments,
+                            initialInspectRepo: h.inspectRepo,
+                            onClose: { fillFromBrief = nil })
         }
         .sheet(item: $planBatchProject) { p in
             PlanBatchView(store: store,
@@ -69,6 +94,7 @@ struct BacklogPane: View {
                               onRefresh: { _ = try? await store.importTasksFromDisk(project: project) },
                               onSettings: { settingsToPermissions = false; settingsToClaudeMd = false; settingsProject = project },
                               onOpenClaudeMd: { settingsToPermissions = false; settingsToClaudeMd = true; settingsProject = project },
+                              onPreparePrompt: { preparePromptProject = project },
                               onFillKanban: { fillKanbanProject = project },
                               onPlanBatch: { planBatchProject = project })
                 KanbanBoard(store: store,
@@ -121,6 +147,15 @@ struct BacklogPane: View {
     }
 }
 
+/// Payload handed from Prepare Prompt to a seeded Fill Kanban sheet.
+private struct BriefHandoff: Identifiable {
+    let id = UUID()
+    let project: Project
+    let brief: String
+    let attachments: [URL]
+    let inspectRepo: Bool
+}
+
 // MARK: - Project header
 
 private struct ProjectHeader: View {
@@ -137,6 +172,7 @@ private struct ProjectHeader: View {
     let onRefresh: () async -> Void
     let onSettings: () -> Void
     let onOpenClaudeMd: () -> Void
+    let onPreparePrompt: () -> Void
     let onFillKanban: () -> Void
     let onPlanBatch: () -> Void
     @State private var refreshing = false
@@ -148,18 +184,21 @@ private struct ProjectHeader: View {
                     .font(AtelierFont.title)
                     .foregroundStyle(Color.atelierInk)
                 if let profile = ProjectProfile.find(id: project.profileId) {
-                    HStack(spacing: 4) {
-                        Image(systemName: profile.iconSystemName)
-                            .font(.system(size: 10))
-                        Text(profile.name)
-                            .font(AtelierFont.eyebrow)
+                    Button(action: onSettings) {
+                        HStack(spacing: 4) {
+                            Image(systemName: profile.iconSystemName)
+                                .font(.system(size: 10))
+                            Text(profile.name)
+                                .font(AtelierFont.eyebrow)
+                        }
+                        .foregroundStyle(Color.atelierInkSecondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Color.atelierSurface, in: Capsule())
+                        .overlay(Capsule().stroke(Color.atelierDivider, lineWidth: 1))
                     }
-                    .foregroundStyle(Color.atelierInkSecondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(Color.atelierSurface, in: Capsule())
-                    .overlay(Capsule().stroke(Color.atelierDivider, lineWidth: 1))
-                    .help(profile.description)
+                    .buttonStyle(.plain)
+                    .help("Mode: \(profile.name) — \(profile.description)\nClick to change in project settings.")
                 }
                 Text("\(taskCount) task\(taskCount == 1 ? "" : "s")")
                     .font(AtelierFont.eyebrow)
@@ -192,6 +231,21 @@ private struct ProjectHeader: View {
                 }
                 .buttonStyle(.plain)
                 .help("Organize tasks into autopilot rounds and launch — drag tasks between rounds to set dependencies.")
+                Button(action: onPreparePrompt) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "text.append")
+                            .font(.system(size: 10))
+                        Text("Prepare prompt")
+                            .font(AtelierFont.caption.weight(.medium))
+                    }
+                    .foregroundStyle(Color.atelierInkSecondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.atelierSurface, in: Capsule())
+                    .overlay(Capsule().stroke(Color.atelierDivider, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Gather context (folders, files, links, docs) and co-author a brief with Claude, then send it to Fill kanban.")
                 Button(action: onFillKanban) {
                     HStack(spacing: 4) {
                         Image(systemName: "wand.and.stars")
@@ -611,6 +665,7 @@ private struct TaskCard: View {
                         if !task.dependsOn.isEmpty {
                             DependencyChip(count: task.dependsOn.count)
                         }
+                        TestStateBadge(state: task.testState, integrity: task.testIntegrity)
                         if let phase = autopilotPhase {
                             AutopilotPhaseChip(phase: phase)
                         }
@@ -736,6 +791,42 @@ struct PriorityPill: View {
     }
 }
 
+/// Tiny TDD-gate indicator on a task card: red when tests fail, green when they
+/// pass. Nothing for `.unknown` / `.noTests` to avoid noise.
+private struct TestStateBadge: View {
+    let state: AtelierTask.TestState
+    var integrity: AtelierTask.TestIntegrity = .unevaluated
+    var body: some View {
+        HStack(spacing: 3) {
+            switch state {
+            case .red, .regressed:
+                Image(systemName: "xmark.octagon.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Palette.error)
+                    .help("Tests red — blocked from review/merge")
+            case .green, .greenMerged:
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Palette.success)
+                    .help("Tests green")
+            case .toolchainMissing:
+                Image(systemName: "wrench.and.screwdriver.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Palette.warning)
+                    .help("Couldn't run tests — toolchain missing")
+            case .unknown, .noTests:
+                EmptyView()
+            }
+            if integrity == .suspect {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Palette.warning)
+                    .help("Tests look weakened — merge blocked until reviewed")
+            }
+        }
+    }
+}
+
 // MARK: - Autopilot control
 
 /// One execution round shown in the start-popover preview (the tasks that build in parallel).
@@ -782,7 +873,7 @@ private struct AutopilotControl: View {
     private func pausedPill(_ reason: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "pause.circle.fill").font(.system(size: 11)).foregroundStyle(Palette.warning)
-            Text("Paused · usage limit")
+            Text(reason.contains("auto-resume") ? "Paused · auto-resume scheduled" : "Paused · usage limit")
                 .font(AtelierFont.caption.weight(.medium))
                 .foregroundStyle(Palette.warning)
                 .lineLimit(1)
@@ -983,11 +1074,18 @@ private struct AutopilotControl: View {
     private func phaseSummary(_ run: AutopilotRun) -> String {
         let phases = Array(run.taskPhases.values)
         func count(_ pred: (TaskPhase) -> Bool) -> Int { phases.filter(pred).count }
-        let building = count { if case .building = $0 { return true }; return false }
+        let building = count { if case .building = $0 { return true }; if case .buildingVerify = $0 { return true }; return false }
+        let testing = count { if case .testing = $0 { return true }; return false }
         let reviewing = count { if case .reviewing = $0 { return true }; if case .fixing = $0 { return true }; return false }
-        let merging = count { if case .merging = $0 { return true }; if case .resolvingConflict = $0 { return true }; return false }
+        let merging = count {
+            if case .merging = $0 { return true }
+            if case .verifyingMerge = $0 { return true }
+            if case .resolvingConflict = $0 { return true }
+            return false
+        }
         var parts: [String] = []
         if building > 0 { parts.append("building \(building)") }
+        if testing > 0 { parts.append("testing \(testing)") }
         if reviewing > 0 { parts.append("reviewing \(reviewing)") }
         if merging > 0 { parts.append("merging \(merging)") }
         if run.status == .stopping { parts.append("stopping…") }
@@ -1122,9 +1220,12 @@ private struct AutopilotPhaseChip: View {
         switch phase {
         case .queued: return "queued"
         case .building: return "building"
+        case .buildingVerify: return "build-verify"
+        case .testing: return "testing"
         case .reviewing: return "reviewing"
         case .fixing(let p): return "fixing \(p)"
         case .merging: return "merging"
+        case .verifyingMerge: return "verifying"
         case .resolvingConflict: return "conflict"
         case .done: return "merged"
         case .blocked: return "blocked"
@@ -1133,7 +1234,7 @@ private struct AutopilotPhaseChip: View {
     private var color: Color {
         switch phase {
         case .queued: return Color.atelierInkSecondary
-        case .building, .reviewing, .fixing, .merging: return Color.atelierAccent
+        case .building, .buildingVerify, .testing, .reviewing, .fixing, .merging, .verifyingMerge: return Color.atelierAccent
         case .resolvingConflict: return Palette.warning
         case .done: return Palette.success
         case .blocked: return Palette.error

@@ -176,6 +176,9 @@ final class TaskSpawner {
             logger.warning("skill install issues: \(skillReport.errors.joined(separator: "; "), privacy: .public)")
         }
 
+        // Resolve the mode once — used for the TDD prompt block and the post-run test gate.
+        let profile = ProjectProfile.find(id: project.profileId) ?? .generic
+
         // 2. Insert Agent row (snapshot the spawn). Update on the fly afterwards.
         var newAgent = Agent.newSpawn(taskId: task.id,
                                       worktreePath: worktree.absolutePath,
@@ -230,7 +233,7 @@ final class TaskSpawner {
         }
 
         // 6. Build prompt and additional dirs
-        let prompt = Self.buildPrompt(task: task, project: project, worktree: worktree)
+        let prompt = Self.buildPrompt(task: task, project: project, profile: profile, worktree: worktree)
         let attachmentsDir = URL(fileURLWithPath: project.path)
             .appendingPathComponent(".atelier")
             .appendingPathComponent("attachments")
@@ -255,7 +258,8 @@ final class TaskSpawner {
             additionalDirs: additionalDirs,
             includePartialMessages: false,
             maxTurns: 80,
-            resumeSessionId: nil
+            resumeSessionId: nil,
+            extraEnv: ToolchainChecker.environmentExports(profile: profile, mainRepoPath: project.path)
         )
 
         run.statusHint = ""
@@ -303,10 +307,56 @@ final class TaskSpawner {
             run.agent.status = finalStatus
         }
 
-        // 8. Promote task to Review on success.
+        // 8. Strict-TDD gate, then promote to Review only when green.
+        //    The worker is done; now Atelier runs the mode's test command in the
+        //    worktree and gates on the exit code. Red → the task stays In Progress
+        //    with a summary of why; green (or a mode with no test command) → Review.
         if run.agent.status == .completed {
             if let latest = store.taskByID(task.id), latest.status == .inProgress {
-                try? await store.updateTaskStatus(latest, to: .review)
+                var gated = latest
+                if profile.build.fastTestCommands.isEmpty {
+                    gated.testState = .noTests
+                    gated.testSummary = nil
+                    gated.status = .review
+                } else {
+                    run.statusHint = "Running tests…"
+                    let result = await TestRunner.runFastTests(profile: profile,
+                                                               worktreePath: worktree.absolutePath,
+                                                               mainRepoPath: project.path)
+                    if result.toolchainMissing {
+                        // Tooling absent (SDK/JDK/wrapper) — not a code failure. Surface it and let
+                        // the task into Review; the tests tab explains what to install.
+                        gated.testState = .toolchainMissing
+                        gated.testSummary = result.summaryLine
+                        gated.status = .review
+                    } else {
+                        gated.testState = result.passed ? .green : .red
+                        gated.testSummary = result.summaryLine
+                        // Integrity axis (manual = advisory only, no LLM at the gate): flag whether
+                        // the suite was changed/weakened. The deep "was this necessary & still
+                        // answers the demand?" review runs on-demand from ReviewSection; it never
+                        // blocks the human's merge here.
+                        if !profile.build.testDiscoveryGlobs.isEmpty {
+                            let signals = await TestIntegrityChecker.inspect(profile: profile,
+                                                                             projectPath: project.path,
+                                                                             branch: worktree.branch,
+                                                                             taskId: task.id)
+                            let note = TestIntegrityChecker.declaredNote(worktreePath: worktree.absolutePath, taskId: task.id)
+                            gated.testChangeNote = note
+                            if !signals.anyTestChange {
+                                gated.testIntegrity = .intact
+                            } else if !signals.looksWeakened && note != nil {
+                                gated.testIntegrity = .evolved
+                            } else {
+                                gated.testIntegrity = .suspect   // advisory; user can "Review test changes"
+                            }
+                        }
+                        if result.passed { gated.status = .review }
+                        // red → stays In Progress; the tests tab / card badge shows why.
+                    }
+                    run.statusHint = ""
+                }
+                try? await store.updateTask(gated)
             }
         }
 
@@ -421,7 +471,10 @@ final class TaskSpawner {
             additionalDirs: [project.path],
             includePartialMessages: false,
             maxTurns: 40,
-            resumeSessionId: sessionId
+            resumeSessionId: sessionId,
+            extraEnv: ToolchainChecker.environmentExports(
+                profile: ProjectProfile.find(id: project.profileId) ?? .generic,
+                mainRepoPath: project.path)
         )
 
         run.statusHint = ""
@@ -514,6 +567,7 @@ final class TaskSpawner {
 
     private static func buildPrompt(task: AtelierTask,
                                     project: Project,
+                                    profile: ProjectProfile,
                                     worktree: GitService.WorktreeInfo) -> String {
         var sections: [String] = []
         sections.append("# \(task.title)")
@@ -542,6 +596,23 @@ final class TaskSpawner {
                 att.append("- `\(abs)`")
             }
             sections.append(att.joined(separator: "\n"))
+        }
+
+        let b = profile.build
+        if !b.fastTestCommands.isEmpty {
+            let testCmd = b.fastTestCommands.map(\.command).joined(separator: " && ")
+            var tdd = [
+                "## Test-driven development (enforced)",
+                "This task uses strict TDD. Before writing implementation code:",
+                "1. Write the test(s) that specify the desired behavior. Run them; they MUST fail first.",
+                "2. Implement until `\(testCmd)` exits 0.",
+                "Atelier runs that command in this worktree after you finish; a non-zero exit blocks review/merge until fixed.",
+                "",
+                "Tests are LIVING, not frozen. If implementation reveals the PLANNED DESIGN was wrong and you change it, the tests you wrote first may assert the old design — you MAY revise or replace them to match the corrected design, as long as the new test asserts the new behavior at EQUAL OR GREATER strength. You may NOT delete, @Ignore/skip, or loosen a test merely to make a real failure go away.",
+                "Whenever you change ANY test, declare it: write `.atelier/test-changes/\(task.id).md` with, per change — the test, what changed, and WHY the design changed. Atelier diffs your test files; if the suite shrank or no declaration is found, a reviewer reads that file + the diff to decide legitimate-evolution vs weakening, and unexplained weakening blocks the merge."
+            ]
+            if let hint = b.testScaffoldingHint { tdd.append(hint) }
+            sections.append(tdd.joined(separator: "\n"))
         }
 
         sections.append("""

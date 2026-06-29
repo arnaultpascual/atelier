@@ -133,6 +133,7 @@ struct MainView: View {
                         server: server,
                         approvalQueue: approvalQueue,
                         featureRunner: featureRunner,
+                        chatSpawner: chatSpawner,
                         selectedProjectID: id,
                         selectedTaskID: $selectedTaskID)
                 .navigationSplitViewColumnWidth(min: 560, ideal: 800)
@@ -142,6 +143,7 @@ struct MainView: View {
                         server: server,
                         approvalQueue: approvalQueue,
                         featureRunner: featureRunner,
+                        chatSpawner: chatSpawner,
                         selectedProjectID: nil,
                         selectedTaskID: $selectedTaskID)
                 .navigationSplitViewColumnWidth(min: 560, ideal: 800)

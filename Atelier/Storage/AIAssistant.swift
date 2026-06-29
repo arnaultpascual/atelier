@@ -373,6 +373,25 @@ enum AIAssistant {
         in REAL paths that exist; never invent files.
         """
 
+        let b = profile.build
+        let modeSection: String
+        if !b.fastTestCommands.isEmpty {
+            let testCmds = b.fastTestCommands.map(\.command).joined(separator: " && ")
+            modeSection = """
+
+
+            Mode test conventions for \(profile.name):
+            - Tests (MUST pass green before review/merge): \(testCmds)
+            \(b.testScaffoldingHint.map { "- \($0)" } ?? "")
+            This project uses STRICT TDD. Every task's "## Acceptance criteria" MUST require writing \
+            the test(s) FIRST and the test command above passing green. Atelier runs that command in \
+            the worktree and blocks review/merge on a non-zero exit. Do NOT require building/assembling \
+            the full app to verify — rely on unit tests (the app build is opt-in and may be slow).
+            """
+        } else {
+            modeSection = ""
+        }
+
         let prompt = """
         You are the task decomposer for Atelier, a macOS IDE that orchestrates Claude Code workers.
 
@@ -401,6 +420,7 @@ enum AIAssistant {
         Project default model: \(project.defaultModel ?? "claude-sonnet-4-6")
         Existing task titles (don't duplicate):
         \(existing)
+        \(modeSection)
         \(repoSection)
 
         Brief:
@@ -1096,6 +1116,236 @@ enum AIAssistant {
                                  suggestedFix: (d["suggested_fix"] as? String) ?? "")
         }
         return ReviewReport(verdict: verdict, summary: summary, findings: findings, rawMarkdown: raw)
+    }
+
+    // MARK: - Test-change alignment review (drift)
+
+    /// Did the worker's test change still serve the demand? Drives an automated repair loop rather
+    /// than a human gate: when not `aligned`, `fixInstructions` tells the worker how to converge.
+    struct AlignmentVerdict: Sendable {
+        let aligned: Bool          // test change justified AND implementation still answers the demand
+        let necessary: Bool        // was changing the tests actually necessary (real design change)?
+        let rationale: String      // 1-2 sentences — shown in the report / dossier / UI
+        let fixInstructions: String // concrete next steps when !aligned (fed to the worker)
+        var costUsd: Double = 0
+    }
+
+    /// Reviews a worker's TEST CHANGE in context: reads the real implementation diff + the test diff,
+    /// and judges (1) whether changing the tests was necessary and sound, and (2) whether the change
+    /// STILL satisfies the original demand AND the broader feature intent. When not aligned, returns
+    /// concrete `fixInstructions` so the orchestrator can iterate the worker toward a real solution
+    /// instead of parking the task for a human. Read-only; runs in the worktree.
+    static func reviewTestAlignment(taskTitle: String,
+                                    brief: String,
+                                    globalContext: String?,
+                                    testDiff: String,
+                                    declaredNote: String?,
+                                    mechanicalSummary: String,
+                                    worktreePath: String,
+                                    baseBranch: String,
+                                    apiKey: String? = nil) async throws -> AlignmentVerdict {
+        let trimmedBrief = brief.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = """
+        A worker changed tests while implementing a task. Tests pass now. Your job is NOT to rubber-stamp
+        a green suite — it's to decide whether the change actually serves the demand.
+
+        Inspect the ACTUAL change: run `git diff \(baseBranch)...HEAD` and read the changed files (both
+        implementation and tests) in the current directory (the worktree).
+
+        Task (the initial demand):
+        Title: \(taskTitle)
+        Brief:
+        \"\"\"
+        \(trimmedBrief.isEmpty ? "(no description)" : trimmedBrief)
+        \"\"\"
+        \(globalContext.map { "Broader feature context (the global demand):\n\($0)\n" } ?? "")
+        Worker's declared rationale for the test changes (## TEST-CHANGES):
+        \(declaredNote?.isEmpty == false ? declaredNote! : "(none declared)")
+
+        Mechanical signals on the test files: \(mechanicalSummary)
+        Test-file diff (− removed, + added):
+        \"\"\"
+        \(testDiff.isEmpty ? "(inspect the worktree)" : testDiff)
+        \"\"\"
+
+        Decide:
+        1. NECESSARY — was changing the tests genuinely required by a real design change, or was it a
+           way to dodge a real failure? A weakened test (removed/no-oped/skipped assertion, dropped
+           coverage) that isn't justified by a design change is NOT necessary.
+        2. ALIGNED — does the implementation, as it now stands, STILL fully satisfy the original demand
+           AND the broader feature intent? A change that makes tests pass but drops a required behavior,
+           or drifts from what was asked, is NOT aligned.
+
+        `aligned` is true ONLY when the test change was necessary/sound AND the demand is still fully met.
+        When false, give CONCRETE fix_instructions: what to implement or restore so the demand is met
+        without weakening tests (if a test must change, it must assert the new behavior at
+        equal-or-greater strength and be declared).
+
+        Output ONLY this JSON object — no prose, no fences:
+        {"aligned": true|false, "necessary": true|false, "rationale":"1-2 sentences", "fix_instructions":"empty if aligned"}
+        """
+        let (raw, cost) = try await askJSONWithCost(prompt: prompt,
+                                                    model: ModelRouter.latestOpus,
+                                                    maxTurns: 16,
+                                                    apiKey: apiKey,
+                                                    repoPath: worktreePath)
+        var v = parseAlignmentVerdict(raw)
+        v.costUsd = cost
+        return v
+    }
+
+    private static func parseAlignmentVerdict(_ raw: String) -> AlignmentVerdict {
+        let stripped = stripCodeFences(raw)
+        let jsonText: String
+        if let lo = stripped.firstIndex(of: "{"), let hi = stripped.lastIndex(of: "}"), lo < hi {
+            jsonText = String(stripped[lo...hi])
+        } else {
+            jsonText = stripped
+        }
+        guard let data = jsonText.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // Unparseable → don't auto-pass: treat as not-aligned so the repair loop runs.
+            return AlignmentVerdict(aligned: false, necessary: false,
+                                    rationale: "Could not parse the alignment review.",
+                                    fixInstructions: "Re-verify the change against the task's acceptance criteria and ensure no test was weakened.")
+        }
+        let aligned = (obj["aligned"] as? Bool) ?? false
+        let necessary = (obj["necessary"] as? Bool) ?? false
+        let rationale = (obj["rationale"] as? String) ?? ""
+        let fix = (obj["fix_instructions"] as? String) ?? ""
+        return AlignmentVerdict(aligned: aligned, necessary: necessary, rationale: rationale, fixInstructions: fix)
+    }
+
+    // MARK: - Test dossier (cahier de test)
+
+    /// The LLM-authored parts of a test dossier: per-test-file "what it asserts", a per-criterion
+    /// automated/partial/manual classification, and the manual-QA checklist. Part A (run results)
+    /// is assembled in Swift, NOT here, so it can never be inflated by the model.
+    struct DossierContent: Sendable {
+        struct Criterion: Sendable { let text: String; let coverage: String; let evidence: String }
+        struct ManualCheck: Sendable { let category: String; let title: String; let howTo: String; let why: String }
+        var testFileAsserts: [String: String] = [:]
+        var criteria: [Criterion] = []
+        var manualChecks: [ManualCheck] = []
+        var costUsd: Double = 0
+    }
+
+    /// Generates the judgment parts of the dossier (Sonnet via the router — the diff was already
+    /// Opus-reviewed; this is enumeration, not deep judgment). Runs read-only in the worktree.
+    static func generateDossierContent(taskTitle: String,
+                                       brief: String,
+                                       acceptanceCriteria: [String],
+                                       changedFiles: [String],
+                                       testFiles: [String],
+                                       testResultSummary: String,
+                                       perCommand: [(command: String, passed: Bool)],
+                                       buildStatus: String,
+                                       coverage: String?,
+                                       modeHint: String?,
+                                       reviewSummary: String?,
+                                       reviewFindings: [String],
+                                       deviceCommands: [String],
+                                       worktreePath: String,
+                                       model: String = ModelRouter.Model.sonnet46.rawValue,
+                                       apiKey: String? = nil) async throws -> DossierContent {
+        let cmds = perCommand.map { "`\($0.command)` → \($0.passed ? "PASS" : "FAIL")" }.joined(separator: "; ")
+        let crit = acceptanceCriteria.isEmpty ? "(none stated)" : acceptanceCriteria.map { "- \($0)" }.joined(separator: "\n")
+        let findings = reviewFindings.isEmpty ? "(none)" : reviewFindings.map { "- \($0)" }.joined(separator: "\n")
+        let prompt = """
+        You are writing a FUNCTIONAL ACCEPTANCE TEST BOOKLET (cahier de recette fonctionnelle) for a
+        feature a worker just finished on the git worktree checked out in the current directory. The
+        reader is a person doing functional QA. The whole point is to split, for the END-USER-VISIBLE
+        behavior of this feature, what is ALREADY GUARANTEED by code/tests from what a HUMAN must
+        actually exercise by hand. Example of the distinction: "the badge renders blue" is provable
+        from code/tests (no human check) — but "the badge animates in smoothly and feels responsive"
+        can only be judged by a human.
+
+        TASK: \(taskTitle)
+        Brief:
+        \"\"\"
+        \(brief.isEmpty ? "(no description)" : brief)
+        \"\"\"
+        Acceptance criteria (verbatim):
+        \(crit)
+
+        WHAT THE MACHINE ALREADY VERIFIED (facts — do not contradict or re-claim):
+        - Test commands: \(cmds.isEmpty ? "(none)" : cmds)
+        - Suite summary: \(testResultSummary)
+        - Build: \(buildStatus)
+        - Coverage: \(coverage ?? "not measured")
+        - Changed files: \(changedFiles.isEmpty ? "(none)" : changedFiles.joined(separator: ", "))
+        - Test files changed: \(testFiles.isEmpty ? "none" : testFiles.joined(separator: ", "))
+        - Code reviewer summary: \(reviewSummary ?? "n/a")
+        - Reviewer findings: \n\(findings)
+        - Mode testing convention: \(modeHint ?? "n/a")
+        - Commands needing a real device/emulator, NOT auto-run: \(deviceCommands.isEmpty ? "none" : deviceCommands.joined(separator: ", "))
+
+        Inspect the actual change: `git diff` and read the changed + test files, so you describe the
+        REAL user-facing behavior of THIS feature (not generic boilerplate).
+
+        Output ONLY this JSON object — no prose, no fences:
+        {
+          "test_file_asserts": { "<relative/path/Test.kt>": "one line: which user-facing behavior this test guarantees" },
+          "criteria": [
+            {"text":"<verbatim criterion>","coverage":"automated|partial|manual","evidence":"which test guarantees it, or why only a human can judge it"}
+          ],
+          "manual_checks": [
+            {"category":"ui|device|integration|visual|performance|accessibility|security|edgeCase|dataMigration",
+             "title":"functional check phrased as a user-observable behavior","how_to":"numbered steps a non-developer tester follows in the running app","why":"one line: why code/tests can't guarantee this"}
+          ]
+        }
+
+        manual_checks = the FUNCTIONAL recette. Each item is a USER-OBSERVABLE behavior a human must
+        exercise in the running app, phrased in plain product language (not code). Include ONLY what
+        code/tests cannot guarantee:
+        - perceptual/visual: animations, transitions, layout/spacing feel, color/contrast in context, loading/empty/error states as SEEN
+        - interactive: gestures, focus order, keyboard, timing/latency, "does it feel responsive"
+        - real device/emulator behavior (any deviceCommands above ⇒ at least one device check), real external-service integration, performance under realistic load, accessibility (VoiceOver/TalkBack), security-sensitive flows, and end-to-end user journeys spanning screens
+        EXCLUDE anything a passing test or the type system already guarantees (e.g. "renders blue",
+        "returns 3 items", "maps field X") — those are NOT manual checks. Pure non-visual backend
+        logic fully covered by tests may yield a SHORT list; any UI/UX/device/external work ALWAYS
+        yields at least one functional check. Imperative, concrete, no preamble.
+        """
+        let (raw, cost) = try await askJSONWithCost(prompt: prompt,
+                                                    model: model,
+                                                    maxTurns: 12,
+                                                    apiKey: apiKey,
+                                                    repoPath: worktreePath)
+        var content = parseDossierContent(raw)
+        content.costUsd = cost
+        return content
+    }
+
+    private static func parseDossierContent(_ raw: String) -> DossierContent {
+        let stripped = stripCodeFences(raw)
+        let jsonText: String
+        if let lo = stripped.firstIndex(of: "{"), let hi = stripped.lastIndex(of: "}"), lo < hi {
+            jsonText = String(stripped[lo...hi])
+        } else {
+            jsonText = stripped
+        }
+        guard let data = jsonText.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return DossierContent()
+        }
+        var out = DossierContent()
+        if let asserts = obj["test_file_asserts"] as? [String: Any] {
+            for (k, v) in asserts { if let s = v as? String { out.testFileAsserts[k] = s } }
+        }
+        out.criteria = ((obj["criteria"] as? [[String: Any]]) ?? []).compactMap { d in
+            guard let text = (d["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+            return DossierContent.Criterion(text: text,
+                                            coverage: (d["coverage"] as? String) ?? "manual",
+                                            evidence: (d["evidence"] as? String) ?? "")
+        }
+        out.manualChecks = ((obj["manual_checks"] as? [[String: Any]]) ?? []).compactMap { d in
+            guard let title = (d["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else { return nil }
+            return DossierContent.ManualCheck(category: (d["category"] as? String) ?? "edgeCase",
+                                              title: title,
+                                              howTo: (d["how_to"] as? String) ?? "",
+                                              why: (d["why"] as? String) ?? "")
+        }
+        return out
     }
 
     // MARK: - Autopilot: merge-conflict resolver

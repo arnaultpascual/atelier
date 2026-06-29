@@ -172,7 +172,7 @@ struct SwarmView: View {
         for run in featureRunner.runs.values {
             for (taskId, phase) in run.taskPhases {
                 switch phase {
-                case .reviewing, .resolvingConflict:
+                case .reviewing, .resolvingConflict, .testing, .verifyingMerge, .buildingVerify:
                     guard !spawner.hasLiveWorker(for: taskId),
                           let task = store.taskByID(taskId),
                           let project = store.projectByID(task.projectId) else { continue }
@@ -386,8 +386,13 @@ private struct AutopilotReviewCard: View {
     @State private var hover = false
 
     private var phaseLabel: String {
-        if case .resolvingConflict = entry.phase { return "Resolving conflict" }
-        return "Opus reviewing"
+        switch entry.phase {
+        case .resolvingConflict: return "Resolving conflict"
+        case .testing: return "Running tests"
+        case .verifyingMerge: return "Verifying merge"
+        case .buildingVerify: return "Building (verify)"
+        default: return "Opus reviewing"
+        }
     }
 
     var body: some View {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Review banner for tasks in the Review column. Adapts to whatever the worker
 /// produced:
@@ -33,6 +34,13 @@ struct ReviewSection: View {
     @State private var presentingProtectedMerge = false
     @State private var pendingBase: String = ""
     @State private var newBranchName: String = ""
+    @State private var runningTests: Bool = false
+    @State private var generatingDossier: Bool = false
+    @State private var dossierURL: URL?
+    @State private var alignment: AIAssistant.AlignmentVerdict?
+    @State private var reviewingAlignment: Bool = false
+    @State private var buildVerifying: Bool = false
+    @State private var buildVerifyResult: String?
 
     private struct PreviewItem: Identifiable, Equatable {
         let id = UUID()
@@ -44,6 +52,7 @@ struct ReviewSection: View {
     /// one selection — instead of three stacked panels fighting for the eye.
     private enum InspectorTab: String, CaseIterable, Identifiable {
         case changes = "Changes"
+        case tests = "Tests"
         case conversation = "Conversation"
         case review = "Opus review"
         var id: String { rawValue }
@@ -78,6 +87,7 @@ struct ReviewSection: View {
         )
         .task {
             loadPersistedReview()
+            loadPersistedDossier()
             await refreshDiff()
             await loadDiskTranscript()
             await loadRunDuration()
@@ -86,6 +96,7 @@ struct ReviewSection: View {
             persistedReview = nil
             runDuration = nil
             loadPersistedReview()
+            loadPersistedDossier()
             Task {
                 await refreshDiff()
                 await loadDiskTranscript()
@@ -152,6 +163,8 @@ struct ReviewSection: View {
                 .help("Total worker execution time for this task.")
             }
             Spacer()
+            testStateChip(task.testState)
+            integrityChip(task.testIntegrity)
             if let verdict = parsedVerdict {
                 verdictChip(verdict)
             }
@@ -180,6 +193,7 @@ struct ReviewSection: View {
     private var availableTabs: [InspectorTab] {
         var tabs: [InspectorTab] = []
         if worktreeExists { tabs.append(.changes) }
+        tabs.append(.tests)
         tabs.append(.conversation)
         tabs.append(.review)
         return tabs
@@ -206,6 +220,7 @@ struct ReviewSection: View {
             Group {
                 switch selection {
                 case .changes:      changesTab
+                case .tests:        testsTab
                 case .conversation: conversationTab
                 case .review:       reviewTab
                 }
@@ -246,6 +261,370 @@ struct ReviewSection: View {
         } else {
             loadingRow("Reading git diff…")
         }
+    }
+
+    // MARK: Tests tab (strict-TDD gate)
+
+    private var modeProfile: ProjectProfile { ProjectProfile.find(id: project.profileId) ?? .generic }
+
+    /// Red/regressed tests OR a suspected test-weakening are a hard block on merge (and Mark as Done).
+    /// The integrity block is overridable in the manual flow (Tests tab → "Trust test changes").
+    /// Only the deterministic exit-code gate blocks merge. Test-change integrity is ADVISORY in the
+    /// manual flow — surfaced + agent-reviewable, never a human-verification block.
+    private var testsBlockMerge: Bool { task.testState.blocksMerge }
+
+    @ViewBuilder
+    private var testsTab: some View {
+        let profile = modeProfile
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                testStateChip(task.testState)
+                if task.testState == .unknown {
+                    Text("Not run yet")
+                        .font(AtelierFont.eyebrow)
+                        .foregroundStyle(Color.atelierInkSecondary)
+                }
+                Spacer(minLength: 0)
+                if worktreeExists && !profile.build.fastTestCommands.isEmpty {
+                    Button(action: runTestsNow) {
+                        HStack(spacing: 4) {
+                            if runningTests { ProgressView().controlSize(.mini) }
+                            else { Image(systemName: "play.fill").font(.system(size: 10, weight: .semibold)) }
+                            Text(runningTests ? "Running…" : "Run tests").font(.system(.callout).weight(.medium))
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .foregroundStyle(.white)
+                        .background(Color.atelierAccent, in: RoundedRectangle(cornerRadius: AtelierCorner.control))
+                    }
+                    .buttonStyle(.plain).fixedSize().disabled(runningTests)
+                    .help("Run the mode's test command in this worktree and update the gate.")
+                }
+            }
+
+            // Opt-in build verification (on-demand). The default flow never builds the app.
+            if worktreeExists, let buildCmd = project.resolvedVerifyBuildCommand(profile: profile) {
+                HStack(spacing: 8) {
+                    Button(action: buildVerifyNow) {
+                        HStack(spacing: 4) {
+                            if buildVerifying { ProgressView().controlSize(.mini) }
+                            else { Image(systemName: "hammer").font(.system(size: 10)) }
+                            Text(buildVerifying ? "Building…" : "Build & verify").font(AtelierFont.caption.weight(.medium))
+                        }
+                        .foregroundStyle(Color.atelierAccent)
+                    }
+                    .buttonStyle(.plain).disabled(buildVerifying).fixedSize()
+                    .help("Run `\(buildCmd)` in this worktree to verify the build (can be slow). On-demand — not part of the default gate.")
+                    Spacer()
+                }
+                if let r = buildVerifyResult {
+                    noteRow(r.hasPrefix("Build OK") ? "checkmark.circle" : "exclamationmark.triangle", r,
+                            color: r.hasPrefix("Build OK") ? Palette.success : Palette.warning)
+                }
+            }
+
+            if profile.build.fastTestCommands.isEmpty {
+                noteRow("minus.circle", "This mode has no test command — the TDD gate is informational and won't block merge. Set build/test commands on the mode to enable it.")
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(profile.build.fastTestCommands.count > 1 ? "GATE COMMANDS" : "GATE COMMAND")
+                        .font(AtelierFont.eyebrow)
+                        .foregroundStyle(Color.atelierInkSecondary)
+                    ForEach(profile.build.fastTestCommands) { tc in
+                        Text(tc.command)
+                            .font(AtelierFont.captionMono)
+                            .foregroundStyle(Color.atelierInk)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.atelierBackground.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.atelierDivider.opacity(0.6), lineWidth: 1))
+            }
+
+            if let summary = task.testSummary, !summary.isEmpty {
+                noteRow(testsBlockMerge ? "exclamationmark.triangle" : "checkmark.circle",
+                        summary,
+                        color: testsBlockMerge ? Palette.error : Color.atelierInkSecondary)
+            }
+
+            if task.testState.blocksMerge {
+                CalloutBanner(.danger, "Tests are red — merge and Mark as Done are blocked. Iterate to fix, then Run tests to go green.")
+            }
+
+            if task.testIntegrity == .suspect || alignment != nil {
+                testChangeReviewPanel
+            } else if task.testIntegrity == .evolved {
+                noteRow("checkmark.shield", "Tests evolved with the design (declared & accepted).")
+            }
+
+            Divider().background(Color.atelierDivider).opacity(0.5).padding(.vertical, 2)
+            dossierRow
+        }
+    }
+
+    // MARK: Test dossier (cahier de test)
+
+    private var dossierRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("CAHIER DE TEST")
+                    .font(AtelierFont.eyebrow.weight(.semibold))
+                    .foregroundStyle(Color.atelierInk)
+                Spacer()
+                if worktreeExists {
+                    Button(action: generateDossierNow) {
+                        HStack(spacing: 4) {
+                            if generatingDossier { ProgressView().controlSize(.mini) }
+                            else { Image(systemName: "doc.badge.gearshape").font(.system(size: 10)) }
+                            Text(generatingDossier ? "Generating…" : (dossierURL == nil ? "Generate" : "Regenerate"))
+                                .font(AtelierFont.caption.weight(.medium))
+                        }
+                        .foregroundStyle(Color.atelierAccent)
+                    }
+                    .buttonStyle(.plain).disabled(generatingDossier)
+                    .help("Write a two-part dossier: what's covered by tests vs. what a human must verify.")
+                }
+            }
+            if let url = dossierURL {
+                HStack(spacing: 8) {
+                    Button("Download…") { downloadDossier() }.controlSize(.small)
+                    Button("Reveal") { revealDossier() }.controlSize(.small)
+                    Button("Copy") { copyDossier() }.controlSize(.small)
+                    Spacer()
+                }
+                Text("Saved to .atelier/dossiers/\(task.id).md")
+                    .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                    .lineLimit(1).truncationMode(.middle)
+                    .help(url.path)
+            } else {
+                Text("Two-part deliverable: Part A — covered by tests/code; Part B — manual QA checklist.")
+                    .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
+            }
+        }
+    }
+
+    private func loadPersistedDossier() {
+        dossierURL = TestDossierStore.exists(taskId: task.id, projectPath: project.path)
+            ? TestDossierStore.url(taskId: task.id, projectPath: project.path)
+            : nil
+    }
+
+    private func generateDossierNow() {
+        guard worktreeExists else { return }
+        generatingDossier = true
+        let profile = modeProfile
+        let currentAlignment = alignment   // use an on-demand review if one was run; else DossierBuilder falls back to the task
+        Task {
+            let result = await TestRunner.runFastTests(profile: profile, worktreePath: worktreePath, mainRepoPath: project.path, retriesOnRed: 0)
+            // No app build here — stays build-independent. Use "Build & verify" on-demand if needed.
+            let dossier = await DossierBuilder.build(
+                task: task, profile: profile, project: project, branch: branch,
+                worktreePath: worktreePath, testResult: result, buildOutcome: nil,
+                review: nil, alignment: currentAlignment, apiKey: APIKeyResolver.resolve())
+            let url = TestDossierStore.persist(dossier, projectPath: project.path)
+            await MainActor.run {
+                dossierURL = url
+                generatingDossier = false
+            }
+        }
+    }
+
+    private func downloadDossier() {
+        guard let url = dossierURL, let md = try? String(contentsOf: url, encoding: .utf8) else { return }
+        let panel = NSSavePanel()
+        if let mdType = UTType(filenameExtension: "md") { panel.allowedContentTypes = [mdType] }
+        panel.nameFieldStringValue = "cahier-de-test-\(BacklogMD.slugify(task.title)).md"
+        panel.canCreateDirectories = true
+        if panel.runModal() == .OK, let dest = panel.url {
+            try? md.write(to: dest, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func revealDossier() {
+        guard let url = dossierURL, FileManager.default.fileExists(atPath: url.path) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private func copyDossier() {
+        guard let url = dossierURL, let md = try? String(contentsOf: url, encoding: .utf8) else { return }
+        copyToPasteboard(md)
+    }
+
+    private func runTestsNow() {
+        guard worktreeExists else { return }
+        runningTests = true
+        let profile = modeProfile
+        Task {
+            let result = await TestRunner.runFastTests(profile: profile, worktreePath: worktreePath, mainRepoPath: project.path)
+            var updated = task
+            if profile.build.fastTestCommands.isEmpty {
+                updated.testState = .noTests
+                updated.testSummary = nil
+            } else if result.toolchainMissing {
+                updated.testState = .toolchainMissing
+                updated.testSummary = result.summaryLine
+            } else {
+                updated.testState = result.passed ? .green : .red
+                updated.testSummary = result.summaryLine
+            }
+            try? await store.updateTask(updated)
+            await MainActor.run { runningTests = false }
+        }
+    }
+
+    /// On-demand build verification (opt-in flow; the default gate never builds the app).
+    private func buildVerifyNow() {
+        guard worktreeExists, let command = project.resolvedVerifyBuildCommand(profile: modeProfile) else { return }
+        buildVerifying = true
+        Task {
+            let outcome = await TestRunner.runCommand(command, worktreePath: worktreePath, profile: modeProfile, mainRepoPath: project.path)
+            let summary: String
+            if let o = outcome {
+                if o.passed {
+                    summary = "Build OK — `\(command)`"
+                } else {
+                    let tail = o.stderrTail.isEmpty ? o.stdoutTail : o.stderrTail
+                    summary = "Build failed (exit \(o.exitCode)) — \(String(tail.suffix(160)))"
+                }
+            } else {
+                summary = "Couldn't run the build command."
+            }
+            await MainActor.run {
+                buildVerifyResult = summary
+                buildVerifying = false
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func testStateChip(_ s: AtelierTask.TestState) -> some View {
+        if let m = testStateMeta(s) {
+            HStack(spacing: 4) {
+                Image(systemName: m.icon).font(.system(size: 9, weight: .semibold))
+                Text(m.label).font(AtelierFont.eyebrow)
+            }
+            .foregroundStyle(m.color)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(m.color.opacity(0.12), in: Capsule())
+            .overlay(Capsule().stroke(m.color.opacity(0.3), lineWidth: 1))
+            .help(task.testSummary ?? m.label)
+        }
+    }
+
+    private func testStateMeta(_ s: AtelierTask.TestState) -> (label: String, icon: String, color: Color)? {
+        switch s {
+        case .unknown:     return nil
+        case .green:       return ("Tests green", "checkmark.seal.fill", Palette.success)
+        case .greenMerged: return ("Tests green", "checkmark.seal.fill", Palette.success)
+        case .red:         return ("Tests red", "xmark.octagon.fill", Palette.error)
+        case .regressed:   return ("Regressed", "exclamationmark.triangle.fill", Palette.error)
+        case .noTests:     return ("No tests", "minus.circle", Color.atelierInkSecondary)
+        case .toolchainMissing: return ("Toolchain missing", "wrench.and.screwdriver.fill", Palette.warning)
+        }
+    }
+
+    @ViewBuilder
+    private func integrityChip(_ i: AtelierTask.TestIntegrity) -> some View {
+        if let m = integrityMeta(i) {
+            HStack(spacing: 4) {
+                Image(systemName: m.icon).font(.system(size: 9, weight: .semibold))
+                Text(m.label).font(AtelierFont.eyebrow)
+            }
+            .foregroundStyle(m.color)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(m.color.opacity(0.12), in: Capsule())
+            .overlay(Capsule().stroke(m.color.opacity(0.3), lineWidth: 1))
+            .help(task.testChangeNote ?? m.label)
+        }
+    }
+
+    private func integrityMeta(_ i: AtelierTask.TestIntegrity) -> (label: String, icon: String, color: Color)? {
+        switch i {
+        case .unevaluated, .intact: return nil
+        case .evolved:  return ("Tests evolved", "shield.lefthalf.filled", Color.atelierAccent)
+        case .suspect:  return ("Tests weakened?", "exclamationmark.shield.fill", Palette.warning)
+        }
+    }
+
+    /// Advisory panel for changed/weakened tests. No merge block — offers an on-demand agent review
+    /// ("was the change necessary? does it still answer the demand?") and a human "mark as fine".
+    @ViewBuilder
+    private var testChangeReviewPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            CalloutBanner(.warning, "Test changes detected\(task.testChangeNote == nil ? " (no ## TEST-CHANGES declaration)" : ""). Not blocking — review whether the change was necessary and still answers the demand.")
+            if let note = task.testChangeNote, !note.isEmpty {
+                Text("Worker's declared rationale")
+                    .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                Text(note).font(AtelierFont.caption).foregroundStyle(Color.atelierInk)
+                    .textSelection(.enabled).lineLimit(8)
+            }
+            if let a = alignment {
+                noteRow(a.aligned ? "checkmark.seal" : "exclamationmark.triangle",
+                        "\(a.aligned ? "Aligned" : "Needs rework"): \(a.rationale)",
+                        color: a.aligned ? Palette.success : Palette.warning)
+                if !a.aligned, !a.fixInstructions.isEmpty {
+                    Text("Suggested fix (use Iterate to apply):")
+                        .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                    Text(a.fixInstructions).font(AtelierFont.caption).foregroundStyle(Color.atelierInk)
+                        .textSelection(.enabled).lineLimit(10)
+                }
+            }
+            HStack(spacing: 8) {
+                if worktreeExists {
+                    Button(action: reviewAlignmentNow) {
+                        HStack(spacing: 4) {
+                            if reviewingAlignment { ProgressView().controlSize(.mini) }
+                            else { Image(systemName: "checkmark.seal").font(.system(size: 10)) }
+                            Text(reviewingAlignment ? "Reviewing…" : "Review test changes with agent")
+                                .font(.system(.callout).weight(.medium))
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .foregroundStyle(.white)
+                        .background(Color.atelierAccent, in: RoundedRectangle(cornerRadius: AtelierCorner.control))
+                    }
+                    .buttonStyle(.plain).disabled(reviewingAlignment).fixedSize()
+                    .help("Ask an agent: was the test change necessary, and does the implementation still answer the demand?")
+                }
+                Button("Mark as fine") { markTestsFine() }
+                    .controlSize(.small)
+                    .help("Record these test changes as a legitimate design evolution.")
+                Spacer()
+            }
+        }
+    }
+
+    private func reviewAlignmentNow() {
+        guard worktreeExists else { return }
+        reviewingAlignment = true
+        let profile = modeProfile
+        Task {
+            let signals = await TestIntegrityChecker.inspect(profile: profile, projectPath: project.path,
+                                                             branch: branch, taskId: task.id)
+            let note = TestIntegrityChecker.declaredNote(worktreePath: worktreePath, taskId: task.id)
+            // The reviewer runs `git diff <base>...HEAD` in the worktree — pass the real merge-base,
+            // not "HEAD" (which would diff nothing).
+            let base = await GitService.mergeBaseRef(projectPath: project.path, branch: branch)
+            let v = try? await AIAssistant.reviewTestAlignment(
+                taskTitle: task.title, brief: task.descriptionMd ?? "", globalContext: nil,
+                testDiff: signals.diffText, declaredNote: note, mechanicalSummary: signals.summaryLine,
+                worktreePath: worktreePath, baseBranch: base, apiKey: APIKeyResolver.resolve())
+            await MainActor.run {
+                alignment = v
+                reviewingAlignment = false
+            }
+            if let v, v.aligned {
+                var updated = task
+                updated.testIntegrity = .evolved
+                try? await store.updateTask(updated)
+            }
+        }
+    }
+
+    private func markTestsFine() {
+        var updated = task
+        updated.testIntegrity = .evolved
+        Task { try? await store.updateTask(updated) }
     }
 
     // MARK: Conversation tab (clean bubbles or the raw event stream)
@@ -710,6 +1089,7 @@ struct ReviewSection: View {
                 Button("Reveal worktree", action: revealWorktree)
                 Divider()
                 Button("Mark as Done without merging") { markDone() }
+                    .disabled(testsBlockMerge)
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 13, weight: .medium))
@@ -759,8 +1139,10 @@ struct ReviewSection: View {
             }
             .buttonStyle(.plain)
             .fixedSize()
-            .disabled(merging)
-            .help("Merge worktree-\(task.id) into your current branch (--no-ff), mark the task Done, and remove the worktree. Conflicts abort cleanly so you can resolve by hand.")
+            .disabled(merging || testsBlockMerge)
+            .help(testsBlockMerge
+                  ? "Blocked: tests are red. Fix them (Tests tab → Run tests) before merging."
+                  : "Merge worktree-\(task.id) into your current branch (--no-ff), mark the task Done, and remove the worktree. Conflicts abort cleanly so you can resolve by hand.")
 
         }
     }
@@ -896,6 +1278,10 @@ struct ReviewSection: View {
     /// branch is protected (main / develop / …), it does NOT merge — it offers to create a feature
     /// branch first. A conflict aborts cleanly and points the user at the copyable command.
     private func mergeInApp() {
+        guard !testsBlockMerge else {
+            mergeError = "Tests are red — fix and re-run (Tests tab → Run tests) before merging."
+            return
+        }
         merging = true
         mergeError = nil
         Task {

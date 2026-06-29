@@ -31,12 +31,12 @@ struct ChatsView: View {
             trafficLightReserve
             railHeader
             Divider().background(Color.atelierDivider).opacity(0.5)
-            if store.chatRooms.isEmpty {
+            if store.freeFormChats.isEmpty {
                 emptyRail
             } else {
                 ScrollView {
                     LazyVStack(spacing: 4) {
-                        ForEach(store.chatRooms) { room in
+                        ForEach(store.freeFormChats) { room in
                             roomRow(room)
                         }
                     }
@@ -59,7 +59,7 @@ struct ChatsView: View {
                 Text("Chat")
                     .font(AtelierFont.title)
                     .foregroundStyle(Color.atelierInk)
-                Text("\(store.chatRooms.count) conversation\(store.chatRooms.count == 1 ? "" : "s")")
+                Text("\(store.freeFormChats.count) conversation\(store.freeFormChats.count == 1 ? "" : "s")")
                     .font(AtelierFont.eyebrow)
                     .foregroundStyle(Color.atelierInkSecondary)
             }
@@ -181,7 +181,7 @@ struct ChatsView: View {
 
     private func ensureSelection() async {
         if let id = selectedRoomId, store.chatRoom(id: id) != nil { return }
-        if let first = store.chatRooms.first {
+        if let first = store.freeFormChats.first {
             selectedRoomId = first.id
         }
     }

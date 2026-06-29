@@ -134,6 +134,24 @@ final class AppStore {
         chatRooms.first(where: { $0.id == id })
     }
 
+    /// Free-form chats only — excludes Prepare Prompt briefs (which live in the project board).
+    var freeFormChats: [ChatRoom] { chatRooms.filter { !$0.isBrief } }
+
+    /// Prepare Prompt briefs for a project, most-recent first (observation already sorts by updatedAt desc).
+    func briefRooms(in projectId: String) -> [ChatRoom] {
+        chatRooms.filter { $0.isBrief && $0.projectId == projectId }
+    }
+
+    @discardableResult
+    func createBriefRoom(projectId: String, model: String = "claude-sonnet-4-6") async throws -> ChatRoom {
+        let room = ChatRoom.newBriefDraft(projectId: projectId, model: model)
+        try await db.write { db in
+            var copy = room
+            try copy.insert(db)
+        }
+        return room
+    }
+
     // MARK: - Workspace mutations
 
     func createWorkspace(name: String, color: String = Workspace.suggestedColors[0]) async throws -> Workspace {
@@ -234,6 +252,14 @@ final class AppStore {
 
     func taskByID(_ id: String) -> AtelierTask? {
         tasksByProject.values.flatMap { $0 }.first(where: { $0.id == id })
+    }
+
+    /// Reads the current committed row straight from the DB (not the lagging observation cache),
+    /// so read-modify-write chains in a single pipeline never start from a stale base.
+    func freshTask(_ id: String) async -> AtelierTask? {
+        try? await db.read { db in
+            try AtelierTask.filter(AtelierTask.Columns.id == id).fetchOne(db)
+        }
     }
 
     // MARK: - Task mutations
@@ -390,6 +416,10 @@ final class AppStore {
                     budgetUsd: parsed.budgetUsd,
                     descriptionMd: parsed.body.isEmpty ? nil : parsed.body,
                     attachments: parsed.attachments,
+                    testState: parsed.testState,
+                    testSummary: parsed.testSummary,
+                    testIntegrity: parsed.testIntegrity,
+                    testChangeNote: parsed.testChangeNote,
                     createdAt: parsed.createdAt,
                     updatedAt: parsed.updatedAt
                 )

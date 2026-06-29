@@ -113,8 +113,11 @@ private struct GeneralTab: View {
     @State private var draftModel: String = "claude-sonnet-4-6"
     @State private var draftBudget: String = ""
     @State private var draftAutoApprove: AutoApproveLevel = .off
+    @State private var draftBuildVerify: Bool = false
+    @State private var draftVerifyCommand: String = ""
     @State private var saveError: String?
     @State private var savedOk: Bool = false
+    @State private var toolchain: ToolchainChecker.Report?
     @State private var claudeMdState: ClaudeMdState = .idle
     @State private var claudeMdExists: Bool = false
     @State private var claudeMdDraft: String = ""        // editable copy of the drafted CLAUDE.md
@@ -161,6 +164,11 @@ private struct GeneralTab: View {
             loadDraft()
             checkClaudeMd()
         }
+        .task(id: draftProfileId) {
+            let p = ProjectProfile.find(id: draftProfileId) ?? .generic
+            guard !p.build.requiredTools.isEmpty else { toolchain = nil; return }
+            toolchain = await ToolchainChecker.check(profile: p, projectPath: project.path)
+        }
         .sheet(isPresented: $showClaudeMdReview) {
             ClaudeMdReviewSheet(
                 markdown: $claudeMdDraft,
@@ -197,7 +205,7 @@ private struct GeneralTab: View {
                     .focused($nameFocused)
             }
 
-            field(label: "PROFILE") {
+            field(label: "MODE") {
                 Picker("", selection: $draftProfileId) {
                     ForEach(ProjectProfile.catalog) { p in
                         Label(p.name, systemImage: p.iconSystemName).tag(p.id)
@@ -205,10 +213,14 @@ private struct GeneralTab: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                Text("A mode tailors decomposition, skills, build/test commands and permissions to the target platform.")
+                    .font(AtelierFont.caption)
+                    .foregroundStyle(Color.atelierInkSecondary)
                 if let p = ProjectProfile.find(id: draftProfileId) {
                     Text(p.description)
                         .font(AtelierFont.caption)
                         .foregroundStyle(Color.atelierInkSecondary)
+                    modeBuildSummary(p)
                 }
             }
 
@@ -261,7 +273,34 @@ private struct GeneralTab: View {
                         : "Agents write and edit files unattended (Bash still asks).")
                 }
             }
+
+            field(label: "BUILD VERIFY BEFORE MERGE") {
+                Toggle(isOn: $draftBuildVerify) {
+                    Text("Run a build target before merge (opt-in)")
+                        .font(AtelierFont.caption)
+                }
+                .toggleStyle(.switch)
+                Text("Off by default — Atelier gates on unit tests + code review without building the app (a full build can need a device/target/remote step and take many minutes). Turn on only if a fast, local build target exists.")
+                    .font(AtelierFont.caption)
+                    .foregroundStyle(Color.atelierInkSecondary)
+                if draftBuildVerify {
+                    TextField(buildVerifyPlaceholder, text: $draftVerifyCommand)
+                        .textFieldStyle(.roundedBorder)
+                    Text(draftVerifyCommand.trimmingCharacters(in: .whitespaces).isEmpty
+                         ? "Empty → uses the mode's build command\(modeBuildCommand.map { " (`\($0)`)" } ?? " (none — verification will be skipped)")."
+                         : "Runs `\(draftVerifyCommand)` in the worktree before merge; on failure the worker iterates to fix.")
+                        .font(AtelierFont.eyebrow)
+                        .foregroundStyle(Color.atelierInkSecondary)
+                }
+            }
         }
+    }
+
+    private var modeBuildCommand: String? {
+        (ProjectProfile.find(id: draftProfileId) ?? .generic).build.buildCommand
+    }
+    private var buildVerifyPlaceholder: String {
+        modeBuildCommand.map { "custom command — defaults to \($0)" } ?? "custom build command (e.g. ./gradlew :app:assembleDebug)"
     }
 
     @ViewBuilder
@@ -269,6 +308,88 @@ private struct GeneralTab: View {
         VStack(alignment: .leading, spacing: 6) {
             SectionLabel(label)
             content()
+        }
+    }
+
+    /// Read-only summary of the mode's build/test commands, so the user sees what
+    /// the strict TDD gate will run before merge.
+    @ViewBuilder
+    private func modeBuildSummary(_ p: ProjectProfile) -> some View {
+        let b = p.build
+        if b.buildCommand != nil || !b.testCommands.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                if let build = b.buildCommand {
+                    summaryLine(icon: "hammer", text: build)
+                }
+                ForEach(b.testCommands) { tc in
+                    summaryLine(icon: tc.tier == .fast ? "checkmark.seal" : "iphone",
+                                text: tc.command,
+                                trailing: tc.tier == .fast
+                                    ? "gates review/merge"
+                                    : (tc.requiresDevice ? "optional · needs device" : "optional"))
+                }
+                toolchainReadiness(p)
+            }
+            .padding(.top, 4)
+        } else {
+            Text("No build/test commands for this mode — TDD gating is informational.")
+                .font(AtelierFont.caption)
+                .foregroundStyle(Color.atelierInkSecondary.opacity(0.8))
+        }
+    }
+
+    /// Per-mode toolchain readiness — so the user sees, before launching, whether Atelier can
+    /// actually run this mode's tests (JDK / Android SDK / wrapper …).
+    @ViewBuilder
+    private func toolchainReadiness(_ p: ProjectProfile) -> some View {
+        if !p.build.requiredTools.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text("TOOLCHAIN").font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                    if let r = toolchain {
+                        Text(r.ready ? "ready" : "missing: \(r.missingSummary)")
+                            .font(AtelierFont.eyebrow)
+                            .foregroundStyle(r.ready ? Palette.success : Palette.warning)
+                    } else {
+                        ProgressView().controlSize(.mini)
+                    }
+                }
+                if let r = toolchain {
+                    ForEach(r.tools) { t in
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: t.present ? "checkmark.circle.fill" : (t.required ? "xmark.octagon.fill" : "minus.circle"))
+                                .font(.system(size: 9))
+                                .foregroundStyle(t.present ? Palette.success : (t.required ? Palette.error : Color.atelierInkSecondary))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("\(t.label)\(t.required ? "" : " (optional)")")
+                                    .font(AtelierFont.caption).foregroundStyle(Color.atelierInk)
+                                Text(t.present ? t.detail : t.installHint)
+                                    .font(AtelierFont.eyebrow)
+                                    .foregroundStyle(Color.atelierInkSecondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private func summaryLine(icon: String, text: String, trailing: String? = nil) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 9))
+                .foregroundStyle(Color.atelierInkSecondary)
+            Text(text)
+                .font(AtelierFont.captionMono)
+                .foregroundStyle(Color.atelierInk)
+            if let trailing {
+                Text("· \(trailing)")
+                    .font(AtelierFont.eyebrow)
+                    .foregroundStyle(Color.atelierInkSecondary)
+            }
+            Spacer(minLength: 0)
         }
     }
 
@@ -315,6 +436,8 @@ private struct GeneralTab: View {
         draftModel = project.defaultModel ?? "claude-sonnet-4-6"
         draftBudget = project.budgetUsdMonthly.map { String(format: "%.2f", $0) } ?? ""
         draftAutoApprove = project.autoApproveLevel ?? .off
+        draftBuildVerify = project.buildVerifyBeforeMerge
+        draftVerifyCommand = project.verifyBuildCommand ?? ""
         saveError = nil
         savedOk = false
         // Open in read mode — user has to click the Name field to edit.
@@ -329,6 +452,9 @@ private struct GeneralTab: View {
         updated.defaultModel = draftModel
         updated.budgetUsdMonthly = draftBudget.isEmpty ? nil : parsedBudget
         updated.autoApproveLevel = (draftAutoApprove == .off) ? nil : draftAutoApprove
+        updated.buildVerifyBeforeMerge = draftBuildVerify
+        let cmd = draftVerifyCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.verifyBuildCommand = cmd.isEmpty ? nil : cmd
         Task {
             do {
                 try await store.updateProject(updated)

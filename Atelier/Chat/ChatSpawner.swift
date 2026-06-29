@@ -35,7 +35,8 @@ final class ChatSpawner {
               store: AppStore,
               attachments: [URL] = [],
               allowWeb: Bool = false,
-              contextPath: String? = nil) {
+              contextPath: String? = nil,
+              extraDirs: [String] = []) {
         guard !isBusy(roomId: room.id) else { return }
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -57,7 +58,8 @@ final class ChatSpawner {
                                store: store,
                                attachments: attachments,
                                allowWeb: allowWeb,
-                               contextPath: contextPath)
+                               contextPath: contextPath,
+                               extraDirs: extraDirs)
         }
     }
 
@@ -67,7 +69,8 @@ final class ChatSpawner {
                          store: AppStore,
                          attachments: [URL] = [],
                          allowWeb: Bool = false,
-                         contextPath: String? = nil) async {
+                         contextPath: String? = nil,
+                         extraDirs: [String] = []) async {
         // Ensure the scratch dir exists (user may have nuked it).
         var isDir: ObjCBool = false
         if !FileManager.default.fileExists(atPath: room.scratchPath, isDirectory: &isDir) || !isDir.boolValue {
@@ -98,7 +101,13 @@ final class ChatSpawner {
             ? nil
             : AIAssistant.streamJSONUserEvent(text: promptText, images: att.images)
 
-        let toolsOn = allowWeb || (contextPath != nil)
+        // Pinned context dirs: the primary `contextPath` plus any extra pinned folders
+        // (Prepare Prompt can pin several). De-duplicated, all get Read/Glob/Grep access.
+        var dirs: [String] = []
+        if let contextPath { dirs.append(contextPath) }
+        for d in extraDirs where !dirs.contains(d) { dirs.append(d) }
+        let allowFiles = !dirs.isEmpty
+        let toolsOn = allowWeb || allowFiles
         let agentId = UUID()
         let runner = WorkerRunner()
         let invocation = WorkerRunner.Invocation(
@@ -108,12 +117,12 @@ final class ChatSpawner {
             agentId: agentId,
             settingsPath: "",   // unused in chat mode
             workingDirectory: room.scratchPath,
-            additionalDirs: contextPath.map { [$0] } ?? [],
+            additionalDirs: dirs,
             includePartialMessages: false,
             maxTurns: toolsOn ? 16 : 1,
             resumeSessionId: room.sessionId,
             chatAllowWeb: allowWeb,
-            chatAllowFiles: contextPath != nil,
+            chatAllowFiles: allowFiles,
             inputStreamJSON: imageEvent
         )
 

@@ -23,6 +23,15 @@ struct ChatRoom: Identifiable, Hashable, Codable, Sendable, FetchableRecord, Mut
     var cacheCreationTokens: Int
     var createdAt: Date
     var updatedAt: Date
+    // Prepare Prompt ("brief") extension — all default so existing chats are unaffected.
+    var projectId: String? = nil          // nil = free-form chat
+    var kind: String? = nil               // nil/"chat" = chat; "brief" = Prepare Prompt
+    var briefText: String? = nil          // distilled brief, editable, sent to Fill Kanban
+    var contextPaths: [String] = []       // pinned folders/files (JSON column)
+    var contextLinks: [String] = []       // pinned URLs (JSON column)
+
+    /// True for a Prepare Prompt brief room (vs a free-form chat).
+    var isBrief: Bool { kind == "brief" }
 
     static let databaseTableName = "chat_room"
 
@@ -39,6 +48,11 @@ struct ChatRoom: Identifiable, Hashable, Codable, Sendable, FetchableRecord, Mut
         static let cacheCreationTokens = Column(CodingKeys.cacheCreationTokens)
         static let createdAt = Column(CodingKeys.createdAt)
         static let updatedAt = Column(CodingKeys.updatedAt)
+        static let projectId = Column(CodingKeys.projectId)
+        static let kind = Column(CodingKeys.kind)
+        static let briefText = Column(CodingKeys.briefText)
+        static let contextPaths = Column(CodingKeys.contextPaths)
+        static let contextLinks = Column(CodingKeys.contextLinks)
     }
 }
 
@@ -70,5 +84,14 @@ extension ChatRoom {
             createdAt: now,
             updatedAt: now
         )
+    }
+
+    /// A project-scoped "brief" room for the Prepare Prompt workspace.
+    static func newBriefDraft(projectId: String, model: String = "claude-sonnet-4-6") -> ChatRoom {
+        var room = newDraft(model: model)
+        room.title = "Untitled brief"
+        room.projectId = projectId
+        room.kind = "brief"
+        return room
     }
 }

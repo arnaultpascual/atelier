@@ -144,6 +144,44 @@ enum Schema {
             }
         }
 
+        // v5 — strict-TDD gate state per task (null → decoded as .unknown).
+        migrator.registerMigration("v5_task_test_state") { db in
+            try db.alter(table: "task") { t in
+                t.add(column: "testState", .text)
+                t.add(column: "testSummary", .text)
+            }
+        }
+
+        // v6 — "brief" chat rooms (Prepare Prompt). A brief is a project-scoped,
+        // persistent conversation that gathers context and distills a Fill Kanban
+        // prompt. JSON-array columns default to "[]" so existing rows decode cleanly.
+        migrator.registerMigration("v6_chat_room_brief") { db in
+            try db.alter(table: "chat_room") { t in
+                t.add(column: "projectId", .text)                       // null = free-form chat
+                t.add(column: "kind", .text)                            // null/"chat" vs "brief"
+                t.add(column: "briefText", .text)                       // distilled brief, sent to Fill Kanban
+                t.add(column: "contextPaths", .text).defaults(to: "[]") // JSON array of pinned folders/files
+                t.add(column: "contextLinks", .text).defaults(to: "[]") // JSON array of URLs
+            }
+        }
+
+        // v7 — test-suite integrity axis (orthogonal to testState) + the worker's declared
+        // test-change rationale. null → decoded as .unevaluated.
+        migrator.registerMigration("v7_task_test_integrity") { db in
+            try db.alter(table: "task") { t in
+                t.add(column: "testIntegrity", .text)
+                t.add(column: "testChangeNote", .text)
+            }
+        }
+
+        // v8 — opt-in build verification before merge (default off; stays build-independent).
+        migrator.registerMigration("v8_project_build_verify") { db in
+            try db.alter(table: "project") { t in
+                t.add(column: "buildVerifyBeforeMerge", .boolean).notNull().defaults(to: false)
+                t.add(column: "verifyBuildCommand", .text)
+            }
+        }
+
         try migrator.migrate(pool)
     }
 }

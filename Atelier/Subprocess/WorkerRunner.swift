@@ -62,6 +62,9 @@ actor WorkerRunner {
         /// required to pass image content blocks. stdin is kept open until the
         /// terminal `result` event. Default nil → unchanged argv behaviour.
         var inputStreamJSON: String? = nil
+        /// Extra env vars injected into the worker (e.g. ANDROID_HOME) so the commands it runs
+        /// during TDD find the toolchain — a GUI app doesn't inherit the shell's exports.
+        var extraEnv: [String: String] = [:]
     }
 
     private let logger = Logger(subsystem: "app.atelier", category: "worker")
@@ -188,6 +191,10 @@ actor WorkerRunner {
         ]
         if !invocation.apiKey.isEmpty {
             envOverrides["ANTHROPIC_API_KEY"] = invocation.apiKey
+        }
+        // Toolchain env (e.g. ANDROID_HOME) so the worker's own build/test commands find the SDK.
+        for (key, value) in invocation.extraEnv {
+            if let k = Environment.Key(rawValue: key) { envOverrides[k] = value }
         }
         let environment: Environment = .inherit.updating(envOverrides)
 

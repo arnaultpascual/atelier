@@ -52,6 +52,10 @@ enum BacklogMD {
         var budgetUsd: Double?
         var dependsOn: [String]
         var attachments: [String]
+        var testState: AtelierTask.TestState
+        var testSummary: String?
+        var testIntegrity: AtelierTask.TestIntegrity
+        var testChangeNote: String?
         var createdAt: Date
         var updatedAt: Date
         var body: String
@@ -108,6 +112,13 @@ enum BacklogMD {
             return nil
         }()
 
+        let testStateStr = pulled.removeValue(forKey: "test_state") as? String
+        let testState = testStateStr.flatMap { AtelierTask.TestState(rawValue: $0) } ?? .unknown
+        let testSummary = pulled.removeValue(forKey: "test_summary") as? String
+        let testIntegrityStr = pulled.removeValue(forKey: "test_integrity") as? String
+        let testIntegrity = testIntegrityStr.flatMap { AtelierTask.TestIntegrity(rawValue: $0) } ?? .unevaluated
+        let testChangeNote = pulled.removeValue(forKey: "test_change_note") as? String
+
         let createdAt = (pulled.removeValue(forKey: "created_date") as? String).flatMap(parseDate) ?? Date()
         let updatedAt = (pulled.removeValue(forKey: "updated_date") as? String).flatMap(parseDate) ?? createdAt
 
@@ -121,6 +132,10 @@ enum BacklogMD {
             budgetUsd: budgetUsd,
             dependsOn: dependsOn,
             attachments: attachments,
+            testState: testState,
+            testSummary: testSummary,
+            testIntegrity: testIntegrity,
+            testChangeNote: testChangeNote,
             createdAt: createdAt,
             updatedAt: updatedAt,
             body: parts.body.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -153,6 +168,19 @@ enum BacklogMD {
         fm.append(("depends_on", task.dependsOn))
         if !task.attachments.isEmpty {
             fm.append(("attachments", task.attachments))
+        }
+        // Only emit TDD state when it's meaningful, to keep clean files clean.
+        if task.testState != .unknown {
+            fm.append(("test_state", task.testState.rawValue))
+        }
+        if let summary = task.testSummary, !summary.isEmpty {
+            fm.append(("test_summary", summary))
+        }
+        if task.testIntegrity != .unevaluated {
+            fm.append(("test_integrity", task.testIntegrity.rawValue))
+        }
+        if let note = task.testChangeNote, !note.isEmpty {
+            fm.append(("test_change_note", note))
         }
         fm.append(("created_date", formatDate(task.createdAt)))
         fm.append(("updated_date", formatDate(task.updatedAt)))

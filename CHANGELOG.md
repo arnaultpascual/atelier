@@ -4,6 +4,53 @@ All notable changes to Atelier are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha.4] — 2026-06-29
+
+A development-flow overhaul: project **modes**, a **Prepare prompt** workspace, an enforced
+**test-driven flow** with living-test integrity, a downloadable **functional recette**, per-mode
+**toolchain checks**, and **auto-resume** after usage limits.
+
+### Added
+
+- **Modes (Android-first, extensible)** — a project's mode now carries build/test commands,
+  scaffolding hints and a required toolchain on top of model/skills/permissions. It's shown on the
+  board (clickable → settings) and summarised in project settings. Android ships JVM unit
+  (`./gradlew testDebugUnitTest`) + optional instrumented test commands; iOS/web slot in as new
+  catalog entries.
+- **Prepare prompt** — an iterative, persistent per-feature workspace: pin folders/links/files,
+  co-author a brief with the agent across turns, then **Send to Fill kanban** to pre-fill the
+  decomposer. Backed by a project-scoped, resumable conversation.
+- **Strict TDD gate** — each task runs its mode's tests in the worktree; it only reaches Review when
+  green, merge is blocked while red, and tests re-run post-merge to catch cross-task regressions.
+  Tests-first is enforced via the worker prompt + a universal `tests-first` skill. Flaky suites get
+  one retry so a flake isn't "fixed" by deleting the test.
+- **Living tests + alignment review** — workers may evolve tests when the design legitimately
+  changes, declared in `.atelier/test-changes/<id>.md`. A deterministic detector plus an agent
+  review judge whether a change was necessary and still answers the initial **and** the broader
+  feature demand. In autopilot it drives a bounded review-and-repair loop (block only as a last
+  resort); in the manual flow it's advisory with an on-demand "Review test changes".
+- **Functional recette ("cahier de recette")** — on completion, a downloadable two-part Markdown:
+  Part A *guaranteed by code & tests*, Part B *functional checks a human must verify in the running
+  app* (animations, real-device behavior, integration, perceptual states). Written to
+  `.atelier/dossiers/<id>.md`, generated in autopilot and on-demand, with a Save dialog.
+- **Toolchain preflight** — per-mode checks (JDK, Android SDK, gradlew). Autopilot refuses to start
+  when a required tool is missing; the manual flow surfaces a distinct *toolchain missing* state
+  (never mislabeled as failing tests). Atelier resolves and injects `ANDROID_HOME` into the
+  test/build subprocess **and** the worker, so Gradle finds the SDK even when launched from Finder.
+- **Opt-in build verification** — off by default (Atelier stays independent of the slow, often
+  env/target/remote app build). A per-project toggle + optional fast/local command runs a build
+  before merge (with a fix loop on failure), plus an on-demand **Build & verify** button.
+- **Auto-resume after a usage limit** — autopilot schedules one automatic resume at the plan's reset
+  time + 5 min (read from the subscription usage endpoint); if the reset time is unknown or the
+  retry still hits the limit, it falls back to the manual **Resume**.
+
+### Changed
+
+- Default verification is **build-independent**: unit tests run out of the app build, plus the
+  structural code review — no `assembleDebug` gate in the default flow.
+
+[1.0.0-alpha.4]: https://github.com/arnaultpascual/atelier/releases/tag/v1.0.0-alpha.4
+
 ## [1.0.0-alpha.3] — 2026-05-29
 
 Adds **Claude Opus 4.8** and 1M-context model variants.

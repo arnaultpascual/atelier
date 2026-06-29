@@ -20,8 +20,43 @@ struct AtelierTask: Identifiable, Hashable, Sendable {
     var budgetUsd: Double?
     var descriptionMd: String?      // markdown body after the frontmatter
     var attachments: [String]       // relative paths, e.g. ".atelier/attachments/task-001/foo.png"
+    /// Strict-TDD gate state — orthogonal to `status` (the kanban column). Persisted
+    /// as a DB column + `test_state` frontmatter key. Defaults to `.unknown`.
+    var testState: TestState = .unknown
+    var testSummary: String? = nil  // last test-run summary (cosmetic; e.g. "12 passed / 0 failed")
+    /// Test-suite INTEGRITY — a second axis, orthogonal to `testState`. `testState` answers
+    /// "do the tests pass?" (exit code); `testIntegrity` answers "did the test suite itself get
+    /// weaker?" (computed from the test-file diff). A green run can still be `.suspect`.
+    var testIntegrity: TestIntegrity = .unevaluated
+    var testChangeNote: String? = nil   // worker's declared rationale for test edits (## TEST-CHANGES)
     var createdAt: Date
     var updatedAt: Date
+
+    /// Result of running the mode's fast test command in the worktree. Gates review
+    /// and merge: `.red`/`.regressed` are hard blocks. See `TestRunner`.
+    enum TestState: String, Codable, CaseIterable, Sendable, Hashable {
+        case unknown        // never run (default for legacy + brand-new tasks)
+        case red            // tests written but failing — HARD BLOCK on review/merge
+        case green          // last run passed in the worktree (pre-review)
+        case greenMerged    // re-verified green after merge into base
+        case regressed      // post-merge re-run failed — surfaced as a regression
+        case noTests        // mode has no test command (or task opted out) — gate is informational
+        case toolchainMissing // couldn't run tests — required toolchain (SDK/JDK/wrapper) absent
+
+        /// True when this state must block review/merge. A missing toolchain does NOT block — it's
+        /// an environment problem to surface, not a code failure.
+        var blocksMerge: Bool { self == .red || self == .regressed }
+    }
+
+    /// Did the test SUITE shrink/soften vs the worktree base? Computed from the test-file diff,
+    /// not the exit code (so green-by-weakening is catchable). See `TestIntegrityChecker`.
+    enum TestIntegrity: String, Codable, CaseIterable, Sendable, Hashable {
+        case unevaluated      // never checked (default; legacy; mode without test globs)
+        case intact           // no test files changed, or only additions
+        case evolved          // tests changed AND judged a legitimate design shift
+        case suspect          // change flagged — advisory; autopilot runs a review+repair loop,
+                              // the manual flow surfaces it (it does NOT block merge on its own)
+    }
 
     enum Status: String, Codable, CaseIterable, Sendable, Hashable {
         case toDo = "To Do"
@@ -110,6 +145,10 @@ extension AtelierTask: FetchableRecord, MutablePersistableRecord {
         static let budgetUsd = Column("budgetUsd")
         static let descriptionMd = Column("descriptionMd")
         static let attachments = Column("attachments")
+        static let testState = Column("testState")
+        static let testSummary = Column("testSummary")
+        static let testIntegrity = Column("testIntegrity")
+        static let testChangeNote = Column("testChangeNote")
         static let createdAt = Column("createdAt")
         static let updatedAt = Column("updatedAt")
     }
@@ -135,6 +174,18 @@ extension AtelierTask: FetchableRecord, MutablePersistableRecord {
         budgetUsd = row[Columns.budgetUsd]
         descriptionMd = row[Columns.descriptionMd]
         attachments = Self.decodeStringArray(row[Columns.attachments])
+        if let raw: String = row[Columns.testState], let s = TestState(rawValue: raw) {
+            testState = s
+        } else {
+            testState = .unknown
+        }
+        testSummary = row[Columns.testSummary]
+        if let raw: String = row[Columns.testIntegrity], let i = TestIntegrity(rawValue: raw) {
+            testIntegrity = i
+        } else {
+            testIntegrity = .unevaluated
+        }
+        testChangeNote = row[Columns.testChangeNote]
         createdAt = row[Columns.createdAt]
         updatedAt = row[Columns.updatedAt]
     }
@@ -152,6 +203,10 @@ extension AtelierTask: FetchableRecord, MutablePersistableRecord {
         container[Columns.budgetUsd] = budgetUsd
         container[Columns.descriptionMd] = descriptionMd
         container[Columns.attachments] = Self.encodeStringArray(attachments)
+        container[Columns.testState] = testState.rawValue
+        container[Columns.testSummary] = testSummary
+        container[Columns.testIntegrity] = testIntegrity.rawValue
+        container[Columns.testChangeNote] = testChangeNote
         container[Columns.createdAt] = createdAt
         container[Columns.updatedAt] = updatedAt
     }

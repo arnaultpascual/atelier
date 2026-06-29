@@ -7,9 +7,12 @@ import os
 enum TaskPhase: Equatable {
     case queued
     case building
+    case buildingVerify     // opt-in pre-merge build verification (not a test run)
+    case testing            // running the mode's fast test suite (TDD gate / pre-merge)
     case reviewing
     case fixing(pass: Int)
     case merging
+    case verifyingMerge     // post-merge regression re-run on the integration branch
     case resolvingConflict
     case done
     case blocked(reason: String)
@@ -31,6 +34,8 @@ final class AutopilotRun {
     var readyToMerge: Set<String> = []                  // passed review, queued for the serial merge
     var findingsByTask: [String: [ReviewFinding]] = [:]
     var reportByTask: [String: ReviewReport] = [:]   // initial review per task, for the persisted report
+    var alignmentByTask: [String: AIAssistant.AlignmentVerdict] = [:]   // test-change alignment verdict per task
+    var buildVerifyByTask: [String: TestRunner.CommandOutcome] = [:]    // opt-in build-verify result per task (for the dossier)
     var budgetCapUsd: Double?
     var baseBranch: String = ""
     var integrationBranch: String = ""
@@ -40,6 +45,9 @@ final class AutopilotRun {
 
     @ObservationIgnored var loopTask: Task<Void, Never>?
     @ObservationIgnored fileprivate var deps: FeatureBuildRunner.Deps?
+    /// One-shot auto-resume after a usage-limit pause (scheduled on the reset time + margin).
+    @ObservationIgnored var autoResumeTask: Task<Void, Never>?
+    var didAutoResume = false   // only one automatic attempt; after it, resumption is manual
 
     /// Sum of every task's cost: worker chains (build + fix passes) in `costByTask`,
     /// plus Opus review and conflict-resolution spend in `reviewCostByTask`.
@@ -120,6 +128,7 @@ final class FeatureBuildRunner {
     /// Soft stop: no new spawns, let in-flight workers finish. `force` also SIGTERMs live workers.
     func stop(projectId: String, force: Bool) {
         guard let run = runs[projectId] else { return }
+        run.autoResumeTask?.cancel(); run.autoResumeTask = nil   // cancel any pending auto-resume
         if run.status == .running { run.status = .stopping }
         if force, let deps = run.deps {
             for taskId in run.taskPhases.keys { deps.spawner.cancel(taskId: taskId) }
@@ -130,6 +139,7 @@ final class FeatureBuildRunner {
     func clearRun(projectId: String) {
         guard let run = runs[projectId] else { return }
         if run.status == .running || run.status == .stopping { return }
+        run.autoResumeTask?.cancel(); run.autoResumeTask = nil
         runs[projectId] = nil
     }
 
@@ -137,6 +147,7 @@ final class FeatureBuildRunner {
     /// re-integrates anything left in review, then builds the remaining tasks.
     func resume(projectId: String) {
         guard let run = runs[projectId], case .paused = run.status, let deps = run.deps else { return }
+        run.autoResumeTask?.cancel(); run.autoResumeTask = nil   // manual (or auto) resume takes over
         run.status = .running
         run.lastError = nil
         run.loopTask = Task { @MainActor in await self.runLoop(run: run, deps: deps) }
@@ -145,6 +156,15 @@ final class FeatureBuildRunner {
     // MARK: - Loop
 
     private func runLoop(run: AutopilotRun, deps: Deps) async {
+        // Toolchain preflight: an unattended run that can't even run its tests is pointless and
+        // would mislabel tooling failures as test failures. Refuse to start with install guidance.
+        let toolReport = await ToolchainChecker.check(profile: modeProfile(deps), projectPath: deps.project.path)
+        if !toolReport.ready {
+            let hints = toolReport.requiredMissing.map { "\($0.label): \($0.installHint)" }.joined(separator: " · ")
+            finish(run, .failed("Toolchain not ready — \(toolReport.missingSummary). \(hints)"))
+            return
+        }
+
         // Resolve + guard the base branch.
         do {
             if run.integrationBranch.isEmpty {
@@ -243,7 +263,7 @@ final class FeatureBuildRunner {
                                                       approvalQueue: deps.approvalQueue,
                                                       autopilot: true)
         if let active { run.costByTask[task.id] = active.state.totalCostUsd }
-        if active?.agent.status != .completed {
+        guard active?.agent.status == .completed else {
             // A usage/rate limit isn't the task's fault — pause the whole run (Resume rebuilds it)
             // rather than permanently blocking the task.
             if let active, active.state.looksUsageLimited {
@@ -252,8 +272,29 @@ final class FeatureBuildRunner {
                 await block(task, "build did not complete (\(active?.agent.status.rawValue ?? "no run"))",
                             run: run, deps: deps)
             }
+            return
         }
-        // On success `execute` already promoted the task to .review; Phase B picks it up.
+        // The shared TDD gate (TaskSpawner.execute) promoted the task to .review iff its tests
+        // passed. If it stayed In Progress, tests are red — fix them within the cap so red tasks
+        // don't silently stall outside Phase B (which only picks up .review tasks).
+        guard let latest = deps.store.taskByID(task.id), latest.status == .inProgress else { return }
+        let profile = modeProfile(deps)
+        guard !profile.build.fastTestCommands.isEmpty else {
+            // No test command but somehow unpromoted — promote it so Phase B can review it.
+            await applyGate(task.id, deps: deps, state: .noTests, clearSummary: true, status: .review)
+            return
+        }
+        guard let agent = try? await deps.store.agentsForTask(task.id).first, !agent.worktreePath.isEmpty else {
+            await block(task, "tests red and no worktree to fix", run: run, deps: deps); return
+        }
+        let green = await fixRedTests(task, worktreePath: agent.worktreePath, run: run, deps: deps)
+        if run.status != .running { return }
+        if green {
+            await applyGate(task.id, deps: deps, status: .review)   // testState already .green
+        } else {
+            await block(task, "tests still red after \(maxFixPasses) fix pass\(maxFixPasses == 1 ? "" : "es")",
+                        run: run, deps: deps)
+        }
     }
 
     /// Review + auto-fix a finished worktree. Parallel-safe: only touches this task's own
@@ -265,6 +306,7 @@ final class FeatureBuildRunner {
             await block(task, "no agent/worktree to review", run: run, deps: deps); return
         }
         let worktreePath = agent.worktreePath
+        let agentBranch = agent.branch.isEmpty ? "worktree-\(task.id)" : agent.branch
 
         // Review (structured).
         run.taskPhases[task.id] = .reviewing
@@ -294,7 +336,7 @@ final class FeatureBuildRunner {
             let result = await deps.spawner.iterateAndAwait(task: task,
                                                             project: deps.project,
                                                             priorAgent: prior,
-                                                            message: fixMessage(report.blockingFindings),
+                                                            message: fixMessage(report.blockingFindings, taskId: task.id),
                                                             apiKey: deps.apiKey,
                                                             store: deps.store,
                                                             server: deps.server,
@@ -322,8 +364,126 @@ final class FeatureBuildRunner {
                         run: run, deps: deps)
             return
         }
-        // Passed review — queue for the serial merge phase.
-        run.fixPassesByTask[task.id] = pass
+        // Pre-merge TDD gate: the Opus fix-loop may have changed code, so re-run the suite.
+        // (Tests were green at build time to reach Review; this catches fix-induced regressions.)
+        var alignmentPasses = 0
+        let profile = modeProfile(deps)
+        if !profile.build.fastTestCommands.isEmpty {
+            run.taskPhases[task.id] = .testing
+            let testResult = await TestRunner.runFastTests(profile: profile, worktreePath: worktreePath, mainRepoPath: deps.project.path)
+            if testResult.toolchainMissing {
+                // Tooling vanished mid-run (start was preflighted). Surface, skip gating, let it merge.
+                await applyGate(task.id, deps: deps, state: .toolchainMissing, summary: testResult.summaryLine)
+                run.fixPassesByTask[task.id] = pass
+                run.readyToMerge.insert(task.id)
+                run.taskPhases[task.id] = .reviewing
+                return
+            }
+            await applyGate(task.id, deps: deps, state: testResult.passed ? .green : .red, summary: testResult.summaryLine)
+            if !testResult.passed {
+                let green = await fixRedTests(task, worktreePath: worktreePath, run: run, deps: deps)
+                if run.status != .running { return }
+                if !green {
+                    await block(task, "tests red after review fixes (\(maxFixPasses) pass cap)", run: run, deps: deps)
+                    return
+                }
+            }
+        }
+
+        // Test-change ALIGNMENT review (drift): the suite is green, but if tests changed we ask an
+        // agent — was the change necessary, and does the implementation STILL answer the demand
+        // (local + global feature)? When not, we feed concrete fix instructions back to the worker
+        // and iterate to converge (bounded by maxFixPasses); we block only as a last resort.
+        if !profile.build.testDiscoveryGlobs.isEmpty {
+            let signals = await TestIntegrityChecker.inspect(profile: profile, projectPath: deps.project.path,
+                                                             branch: agentBranch, taskId: task.id)
+            var note = TestIntegrityChecker.declaredNote(worktreePath: worktreePath, taskId: task.id)
+            if signals.anyTestChange && !signals.looksWeakened && note != nil {
+                // Declared, non-weakening evolution — trust it.
+                await applyGate(task.id, deps: deps, integrity: .evolved, changeNote: note)
+            } else if signals.anyTestChange {
+                // Weakened or undeclared change → scrutinize, then repair-loop until aligned.
+                run.taskPhases[task.id] = .testing
+                let first: AIAssistant.AlignmentVerdict
+                do {
+                    first = try await AIAssistant.reviewTestAlignment(
+                        taskTitle: task.title, brief: task.descriptionMd ?? "",
+                        globalContext: featureContext(run, deps, excluding: task.id), testDiff: signals.diffText,
+                        declaredNote: note, mechanicalSummary: signals.summaryLine,
+                        worktreePath: worktreePath, baseBranch: run.baseBranch, apiKey: deps.apiKey)
+                } catch {
+                    // Reviewer never ran (claude down / timeout) — NOT a weakening. Surface as
+                    // unavailable (recoverable on resume); never stamp .suspect.
+                    await applyGate(task.id, deps: deps, integrity: .unevaluated, changeNote: note, clearChangeNote: note == nil)
+                    await block(task, "alignment review unavailable: \(error.localizedDescription)", run: run, deps: deps)
+                    return
+                }
+                run.alignmentByTask[task.id] = first
+                run.reviewCostByTask[task.id, default: 0] += first.costUsd
+
+                var current = first
+                while !current.aligned, alignmentPasses < maxFixPasses, run.status == .running {
+                    alignmentPasses += 1
+                    run.taskPhases[task.id] = .fixing(pass: pass + alignmentPasses)
+                    guard let prior = try? await deps.store.agentsForTask(task.id).first,
+                          prior.sessionId?.isEmpty == false else { break }
+                    let r = await deps.spawner.iterateAndAwait(
+                        task: task, project: deps.project, priorAgent: prior,
+                        message: alignmentFixMessage(current, taskId: task.id), apiKey: deps.apiKey,
+                        store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue, autopilot: true)
+                    if let r { run.costByTask[task.id] = r.state.totalCostUsd }
+                    if let r, r.agent.status != .completed, r.state.looksUsageLimited {
+                        await pauseForUsage(task, run: run, deps: deps); return
+                    }
+                    // Tests must stay green after the alignment fix; recover once if they broke.
+                    let t = await TestRunner.runFastTests(profile: profile, worktreePath: worktreePath, mainRepoPath: deps.project.path)
+                    await applyGate(task.id, deps: deps, state: t.passed ? .green : .red, summary: t.summaryLine)
+                    if !t.passed {
+                        let green = await fixRedTests(task, worktreePath: worktreePath, run: run, deps: deps)
+                        if run.status != .running { return }
+                        if !green { await block(task, "tests red during alignment fix", run: run, deps: deps); return }
+                    }
+                    let s2 = await TestIntegrityChecker.inspect(profile: profile, projectPath: deps.project.path,
+                                                                branch: agentBranch, taskId: task.id)
+                    note = TestIntegrityChecker.declaredNote(worktreePath: worktreePath, taskId: task.id)
+                    do {
+                        current = try await AIAssistant.reviewTestAlignment(
+                            taskTitle: task.title, brief: task.descriptionMd ?? "",
+                            globalContext: featureContext(run, deps, excluding: task.id), testDiff: s2.diffText,
+                            declaredNote: note, mechanicalSummary: s2.summaryLine,
+                            worktreePath: worktreePath, baseBranch: run.baseBranch, apiKey: deps.apiKey)
+                    } catch {
+                        await applyGate(task.id, deps: deps, integrity: .unevaluated, changeNote: note, clearChangeNote: note == nil)
+                        await block(task, "alignment review unavailable mid-repair: \(error.localizedDescription)", run: run, deps: deps)
+                        return
+                    }
+                    run.alignmentByTask[task.id] = current
+                    run.reviewCostByTask[task.id, default: 0] += current.costUsd
+                }
+
+                if current.aligned {
+                    await applyGate(task.id, deps: deps, integrity: .evolved, changeNote: note, clearChangeNote: note == nil)
+                } else {
+                    await applyGate(task.id, deps: deps, integrity: .suspect, changeNote: note, clearChangeNote: note == nil)
+                    await block(task, "test change doesn't answer the demand after \(maxFixPasses) pass(es): \(current.rationale)",
+                                run: run, deps: deps)
+                    return
+                }
+            } else {
+                await applyGate(task.id, deps: deps, integrity: .intact, clearChangeNote: true)
+            }
+        }
+
+        // Opt-in build verification (OFF by default — Atelier stays build-independent). Only runs
+        // when the project enabled it AND a (mode or custom) build command exists.
+        if !(await verifyBuild(task, worktreePath: worktreePath, run: run, deps: deps)) {
+            if run.status != .running { return }   // paused (usage limit) — leave for resume
+            await block(task, "build verification failed after \(maxFixPasses) fix pass(es)", run: run, deps: deps)
+            return
+        }
+
+        // Passed review + tests + alignment (+ optional build) — queue for the serial merge phase.
+        run.fixPassesByTask[task.id] = pass + alignmentPasses
         run.readyToMerge.insert(task.id)
         run.taskPhases[task.id] = .reviewing   // holds here until B2 merges it
     }
@@ -375,17 +535,220 @@ final class FeatureBuildRunner {
     // MARK: - Helpers
 
     private func markMerged(_ task: AtelierTask, run: AutopilotRun, deps: Deps, outcome: String) async {
+        let profile = modeProfile(deps)
+        let hasTests = !profile.build.fastTestCommands.isEmpty
+        var summary = outcome
+        var toolchainMissing = false
+
+        // Post-merge re-verify on the INTEGRATION branch — UNIT TESTS ONLY (no app build, which can
+        // need a device/target/remote step). Catches cross-task breakage between parallel merges.
+        // Runs BEFORE removing the worktree so a regression stays inspectable.
+        if hasTests {
+            run.taskPhases[task.id] = .verifyingMerge
+            let result = await TestRunner.runFastTests(profile: profile, worktreePath: deps.project.path, mainRepoPath: deps.project.path)
+            if result.toolchainMissing {
+                // Can't re-verify without tooling — surface, don't falsely flag a regression.
+                toolchainMissing = true
+                await applyGate(task.id, deps: deps, state: .toolchainMissing, summary: result.summaryLine)
+            } else if !result.passed {
+                await applyGate(task.id, deps: deps, state: .regressed,
+                                summary: "Post-merge regression: \(result.summaryLine)")
+                await block(task, "post-merge regression: \(result.summaryLine)", run: run, deps: deps)
+                return   // leave the worktree on disk for inspection
+            } else {
+                summary = result.summaryLine
+            }
+        }
+
         writeAutopilotReport(task: task, project: deps.project, report: run.reportByTask[task.id], outcome: outcome)
-        try? await deps.store.updateTaskStatus(task, to: .done)
+        // Generate the two-part test dossier while the worktree is still on disk. Sourced from the
+        // WORKTREE (not the integration branch) so Part A's results and Part B's diff describe the
+        // same, task-scoped tree (the integration branch also contains sibling tasks).
+        await generateDossier(task: task, run: run, deps: deps, profile: profile)
+        if hasTests && !toolchainMissing {
+            await applyGate(task.id, deps: deps, state: .greenMerged, summary: summary, status: .done)
+        } else {
+            // No tests, or tooling missing → just mark done (preserve a .toolchainMissing state).
+            await applyGate(task.id, deps: deps, status: .done)
+        }
         try? await GitService.removeWorktree(projectPath: deps.project.path, taskId: task.id, force: false)
         run.taskPhases[task.id] = .done
+    }
+
+    /// Builds + persists the test dossier for a just-merged task. Best-effort: a failure never
+    /// blocks the merge. Runs the suite/build in the WORKTREE (still on disk) so Part A's results and
+    /// Part B's diff describe the same, task-scoped tree.
+    private func generateDossier(task: AtelierTask, run: AutopilotRun, deps: Deps, profile: ProjectProfile) async {
+        guard let agent = try? await deps.store.agentsForTask(task.id).first,
+              !agent.worktreePath.isEmpty,
+              FileManager.default.fileExists(atPath: agent.worktreePath) else { return }
+        let branch = agent.branch.isEmpty ? "worktree-\(task.id)" : agent.branch
+        let result = await TestRunner.runFastTests(profile: profile, worktreePath: agent.worktreePath, mainRepoPath: deps.project.path, retriesOnRed: 0)
+        // No app build here — stays build-independent. If opt-in build-verify ran pre-merge, reuse
+        // its result for Part A (don't re-build).
+        let dossier = await DossierBuilder.build(
+            task: task, profile: profile, project: deps.project, branch: branch,
+            worktreePath: agent.worktreePath, testResult: result, buildOutcome: run.buildVerifyByTask[task.id],
+            review: run.reportByTask[task.id], alignment: run.alignmentByTask[task.id], apiKey: deps.apiKey)
+        TestDossierStore.persist(dossier, projectPath: deps.project.path)
+        run.reviewCostByTask[task.id, default: 0] += dossier.costUsd
     }
 
     private func block(_ task: AtelierTask, _ reason: String, run: AutopilotRun, deps: Deps) async {
         logger.warning("autopilot blocked \(task.id, privacy: .public): \(reason, privacy: .public)")
         writeAutopilotReport(task: task, project: deps.project, report: run.reportByTask[task.id], outcome: "Blocked — \(reason)")
         run.taskPhases[task.id] = .blocked(reason: reason)
-        try? await deps.store.updateTaskStatus(task, to: .blocked)
+        // Preserve the task's just-written testState/testIntegrity by mutating the COMMITTED row
+        // (the observation cache lags and would clobber e.g. .regressed back to .green).
+        if var latest = await deps.store.freshTask(task.id) {
+            latest.status = .blocked
+            try? await deps.store.updateTask(latest)
+        } else {
+            try? await deps.store.updateTaskStatus(task, to: .blocked)
+        }
+    }
+
+    // MARK: - TDD gate (autopilot)
+
+    private func modeProfile(_ deps: Deps) -> ProjectProfile {
+        ProjectProfile.find(id: deps.project.profileId) ?? .generic
+    }
+
+    /// Updates a task's TDD state / summary / status in one write, off a fresh copy so it never
+    /// clobbers a concurrently-updated field. Pass only what should change.
+    private func applyGate(_ taskId: String, deps: Deps,
+                           state: AtelierTask.TestState? = nil,
+                           summary: String? = nil,
+                           clearSummary: Bool = false,
+                           integrity: AtelierTask.TestIntegrity? = nil,
+                           changeNote: String? = nil,
+                           clearChangeNote: Bool = false,
+                           status: AtelierTask.Status? = nil) async {
+        // Read the committed row (NOT the lagging observation cache) so a prior write in this
+        // pipeline isn't clobbered by a full-row re-encode from a stale base.
+        guard var t = await deps.store.freshTask(taskId) else { return }
+        if let state { t.testState = state }
+        if clearSummary { t.testSummary = nil }
+        else if let summary { t.testSummary = summary }
+        if let integrity { t.testIntegrity = integrity }
+        if clearChangeNote { t.testChangeNote = nil }
+        else if let changeNote { t.testChangeNote = changeNote }
+        if let status { t.status = status }
+        try? await deps.store.updateTask(t)
+    }
+
+    /// Iterates the worker to turn red tests green, re-running the suite after each pass, capped at
+    /// `maxFixPasses`. Returns true once green. Assumes the task's tests are currently red.
+    private func fixRedTests(_ task: AtelierTask, worktreePath: String, run: AutopilotRun, deps: Deps) async -> Bool {
+        let profile = modeProfile(deps)
+        var pass = 0
+        while pass < maxFixPasses && run.status == .running {
+            pass += 1
+            run.taskPhases[task.id] = .fixing(pass: pass)
+            guard let prior = try? await deps.store.agentsForTask(task.id).first,
+                  prior.sessionId?.isEmpty == false else { return false }
+            let summary = deps.store.taskByID(task.id)?.testSummary ?? "Tests are failing."
+            let result = await deps.spawner.iterateAndAwait(task: task,
+                                                            project: deps.project,
+                                                            priorAgent: prior,
+                                                            message: testFixMessage(summary, taskId: task.id),
+                                                            apiKey: deps.apiKey,
+                                                            store: deps.store,
+                                                            server: deps.server,
+                                                            approvalQueue: deps.approvalQueue,
+                                                            autopilot: true)
+            if let result { run.costByTask[task.id] = result.state.totalCostUsd }
+            if let result, result.agent.status != .completed, result.state.looksUsageLimited {
+                await pauseForUsage(task, run: run, deps: deps); return false
+            }
+            run.taskPhases[task.id] = .testing
+            let testResult = await TestRunner.runFastTests(profile: profile, worktreePath: worktreePath, mainRepoPath: deps.project.path)
+            await applyGate(task.id, deps: deps, state: testResult.passed ? .green : .red, summary: testResult.summaryLine)
+            if testResult.passed { return true }
+        }
+        return false
+    }
+
+    /// Opt-in build verification before merge (OFF by default). Runs the project's verify build
+    /// command in the worktree; on failure, iterates the worker to fix (bounded). Returns true to
+    /// proceed (passed, or disabled / no command / worktree gone). The toolchain was preflighted at
+    /// run start, so a failure here is a real build error, not missing tooling.
+    private func verifyBuild(_ task: AtelierTask, worktreePath: String, run: AutopilotRun, deps: Deps) async -> Bool {
+        guard deps.project.buildVerifyBeforeMerge else { return true }
+        let profile = modeProfile(deps)
+        guard let command = deps.project.resolvedVerifyBuildCommand(profile: profile) else { return true }
+        run.taskPhases[task.id] = .buildingVerify
+        var outcome = await TestRunner.runCommand(command, worktreePath: worktreePath, profile: profile, mainRepoPath: deps.project.path)
+        var pass = 0
+        while let o = outcome, !o.passed, pass < maxFixPasses, run.status == .running {
+            pass += 1
+            run.taskPhases[task.id] = .fixing(pass: pass)
+            guard let prior = try? await deps.store.agentsForTask(task.id).first,
+                  prior.sessionId?.isEmpty == false else { break }
+            let tail = o.stderrTail.isEmpty ? o.stdoutTail : o.stderrTail
+            let r = await deps.spawner.iterateAndAwait(
+                task: task, project: deps.project, priorAgent: prior,
+                message: buildFixMessage(command, String(tail.suffix(1500))), apiKey: deps.apiKey,
+                store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue, autopilot: true)
+            if let r { run.costByTask[task.id] = r.state.totalCostUsd }
+            if let r, r.agent.status != .completed, r.state.looksUsageLimited {
+                await pauseForUsage(task, run: run, deps: deps); return false
+            }
+            outcome = await TestRunner.runCommand(command, worktreePath: worktreePath, profile: profile, mainRepoPath: deps.project.path)
+        }
+        if let o = outcome { run.buildVerifyByTask[task.id] = o }   // surface in the dossier
+        return outcome?.passed ?? true   // nil = worktree gone; don't hard-fail on that
+    }
+
+    private func buildFixMessage(_ command: String, _ tail: String) -> String {
+        """
+        The build verification command failed: `\(command)`. Fix the build so it exits 0. Keep the
+        tests green and don't weaken them. Commit when done.
+
+        Build output (tail):
+        \(tail)
+        """
+    }
+
+    private func testFixMessage(_ summary: String, taskId: String) -> String {
+        """
+        Your tests are failing — the strict-TDD gate blocks this task until they pass. Fix the code
+        so the test command exits 0. If a test asserts an OBSOLETE design you deliberately changed,
+        you may update that test to assert the NEW behavior at equal-or-greater strength — and declare
+        it in `.atelier/test-changes/\(taskId).md`. NEVER delete, @Ignore/skip, or loosen a test just
+        to dodge a real failure; that is detected and blocks the merge. Commit when done.
+
+        Failure summary:
+        \(summary)
+        """
+    }
+
+    /// Fed to the worker when the alignment reviewer found the test change doesn't serve the demand.
+    private func alignmentFixMessage(_ v: AIAssistant.AlignmentVerdict, taskId: String) -> String {
+        """
+        A reviewer checked whether your test changes were necessary and whether the implementation
+        still answers the original demand (and the broader feature). It found problems:
+        \(v.rationale)
+
+        Do this:
+        \(v.fixInstructions)
+
+        Converge on a solution that FULLY answers the demand WITHOUT weakening tests. If a test must
+        change, it must assert the new behavior at equal-or-greater strength, and you must declare it
+        in `.atelier/test-changes/\(taskId).md`. Keep the test suite green. Commit when done.
+        """
+    }
+
+    /// The broader feature context (the "global demand"): the sibling tasks in this autopilot run,
+    /// so the alignment reviewer can judge against the whole feature, not just one task.
+    private func featureContext(_ run: AutopilotRun, _ deps: Deps, excluding taskId: String) -> String? {
+        let titles = run.taskPhases.keys
+            .filter { $0 != taskId }
+            .compactMap { deps.store.taskByID($0)?.title }
+            .sorted()
+        guard !titles.isEmpty else { return nil }
+        return "This task is part of a larger feature built in parallel. Sibling tasks:\n"
+            + titles.map { "- \($0)" }.joined(separator: "\n")
     }
 
     /// Persists a human-readable per-task report to `<project>/.atelier/autopilot/<taskId>.md`,
@@ -473,6 +836,44 @@ final class FeatureBuildRunner {
         let reason = "Usage limit reached while building “\(task.title)”. Resume once your limit resets."
         run.status = .paused(reason)
         run.lastError = reason
+        scheduleAutoResume(run: run, projectId: deps.project.id)
+    }
+
+    /// Schedules ONE automatic resume after a usage-limit pause — only when we can determine the
+    /// reset time (from the Claude subscription usage endpoint). We resume `resetsAt + 5 min` (a
+    /// margin, since relaunching exactly on the reset minute often still trips the limit). If the
+    /// reset time is unknown, or this run already used its one auto-resume, we leave it for the
+    /// manual Resume button. `resetsAt` is an absolute Date (ISO-8601 with offset) — timezone-safe.
+    private func scheduleAutoResume(run: AutopilotRun, projectId: String) {
+        guard !run.didAutoResume else { return }
+        run.didAutoResume = true
+        run.autoResumeTask?.cancel()
+        run.autoResumeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let resetsAt = await Self.nextUsageResetDate() else { return }   // unknown → manual only
+            let resumeAt = resetsAt.addingTimeInterval(300)   // +5 min margin
+            // Reflect the plan in the paused pill so the user knows it'll come back on its own.
+            if case .paused = run.status, runs[projectId] === run {
+                let f = DateFormatter(); f.timeStyle = .short; f.dateStyle = .none   // user's local tz
+                run.status = .paused("Usage limit — auto-resume around \(f.string(from: resumeAt)) (or Resume now).")
+            }
+            let delay = max(resumeAt.timeIntervalSinceNow, 30)   // at least a short beat
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, runs[projectId] === run, case .paused = run.status else { return }
+            resume(projectId: projectId)
+        }
+    }
+
+    /// Best-effort "when can we resume?" from the Claude subscription usage endpoint. Returns the
+    /// LATEST reset among maxed (≥95%) windows (you can't resume until every blocking window resets),
+    /// else the soonest future reset across windows, else nil (API-key users / endpoint unavailable).
+    private static func nextUsageResetDate() async -> Date? {
+        guard let limits = try? await UsageLimitsService.fetch() else { return nil }
+        let windows = [limits.fiveHour, limits.sevenDay, limits.sevenDayOpus, limits.sevenDaySonnet].compactMap { $0 }
+        let now = Date()
+        let blocking = windows.filter { $0.utilization >= 95 }.compactMap { $0.resetsAt }.filter { $0 > now }
+        if let latest = blocking.max() { return latest }
+        return windows.compactMap { $0.resetsAt }.filter { $0 > now }.min()
     }
 
     private func overBudget(_ run: AutopilotRun) -> Bool {
@@ -484,13 +885,16 @@ final class FeatureBuildRunner {
         String(format: "Budget cap reached — $%.2f spent of $%.2f.", run.totalCostUsd, run.budgetCapUsd ?? 0)
     }
 
-    private func fixMessage(_ findings: [ReviewFinding]) -> String {
+    private func fixMessage(_ findings: [ReviewFinding], taskId: String) -> String {
         let list = findings.enumerated()
             .map { "\($0.offset + 1). \($0.element.oneLine)\n   Fix: \($0.element.suggestedFix)" }
             .joined(separator: "\n")
         return """
         A reviewer found blocking issues in your work. Fix ONLY these — do not refactor anything
         else, and ignore any minor/cosmetic nits. Keep the build and tests green, and commit when done.
+        If a fix legitimately changes behavior a test asserted, update that test to the new contract
+        (equal-or-greater strength) and declare it in `.atelier/test-changes/\(taskId).md` — never
+        weaken or skip a test to pass.
 
         \(list)
         """

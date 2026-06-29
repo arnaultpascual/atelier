@@ -222,7 +222,9 @@ enum GitService {
                     let raw = String(line)
                     guard raw.count >= 4 else { continue }
                     let code = String(raw.prefix(2))
-                    let path = String(raw.dropFirst(3))
+                    var path = String(raw.dropFirst(3))
+                    // Porcelain emits renames as "old -> new"; keep the destination.
+                    if let r = path.range(of: " -> ") { path = String(path[r.upperBound...]) }
                     if seenPaths.contains(path) { continue }
                     let status: ChangeStatus = {
                         if code.contains("?") { return .untracked }
@@ -282,6 +284,32 @@ enum GitService {
             .appendingPathComponent(taskId)
             .appendingPathComponent(relativePath)
         return try? Data(contentsOf: url)
+    }
+
+    /// Resolves the merge-base of HEAD and `branch` in the main repo. Falls back to "HEAD"
+    /// when there's no common ancestor (mirrors `diffStat`'s fallback). Never throws.
+    static func mergeBaseRef(projectPath: String, branch: String) async -> String {
+        let r = try? await runGit(args: ["merge-base", "HEAD", branch], workingDirectory: projectPath)
+        let base = r?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return (r?.success == true && !base.isEmpty) ? base : "HEAD"
+    }
+
+    /// Unified diff of `paths` in the worktree vs `ref` (captures both committed and uncommitted
+    /// changes, since `git diff <ref>` in a worktree compares the working tree to `ref`). Returns
+    /// "" on error / no diff. Used by `TestIntegrityChecker` to inspect test-file deltas.
+    static func worktreeDiff(worktreePath: String, ref: String, paths: [String]) async -> String {
+        guard !paths.isEmpty else { return "" }
+        var args = ["diff", ref, "--"]
+        args.append(contentsOf: paths)
+        let r = try? await runGit(args: args, workingDirectory: worktreePath)
+        return (r?.success == true) ? r!.stdout : ""
+    }
+
+    /// Marks `paths` as intent-to-add (`git add -N`) in the worktree, so brand-new untracked files
+    /// show their content in a subsequent `git diff`. Best-effort; ignores failures.
+    static func intentToAdd(worktreePath: String, paths: [String]) async {
+        guard !paths.isEmpty else { return }
+        _ = try? await runGit(args: ["add", "-N"] + paths, workingDirectory: worktreePath)
     }
 
     static func branchExists(projectPath: String, branch: String) async throws -> Bool {

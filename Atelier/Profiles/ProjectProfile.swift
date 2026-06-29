@@ -14,6 +14,14 @@ import Foundation
 ///
 /// **Detection** lives in `ProjectProfileDetector`. It scans for marker files
 /// (package.json, Cargo.toml, *.xcodeproj, …) and returns a best-fit profile.
+///
+/// User-facing name: **"Mode"**. A mode also carries `build` (build/test commands)
+/// which feeds the strict TDD gate and the Fill Kanban decomposition prompt.
+///
+/// **Adding a mode** (iOS, web, …) is one new `catalog` entry with its `build:`
+/// block + a `Resources/Skills/profiles/<id>/` skill folder — no other code:
+///   - iOS:  `xcodebuild build/test -destination 'platform=iOS Simulator'`
+///   - web:  `pnpm build` / `pnpm test -- --run` (Vitest non-watch)
 struct ProjectProfile: Identifiable, Hashable, Sendable {
     let id: String                     // stable, persisted in Project.profileId
     let name: String                   // human label
@@ -22,6 +30,50 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
     let suggestedLabels: [String]
     let description: String            // one-line tooltip
     let defaultRules: [PermissionRule] // safe read-only allows pre-baked
+    /// Build & test commands for the mode. Defaults to `.none`, so profiles
+    /// without a configured toolchain keep compiling and behave unchanged.
+    var build: BuildConfig = .none
+
+    /// Per-mode build/test configuration. `testCommands` is what Atelier runs in a
+    /// worktree to gate the TDD flow; `buildCommand` is an optional compile check.
+    struct BuildConfig: Hashable, Sendable {
+        var buildCommand: String?               // e.g. "./gradlew assembleDebug" — nil = no build gate
+        var testCommands: [TestCommand]         // exit 0 of all .fast = green
+        var testScaffoldingHint: String?        // one line injected into decompose + worker prompts
+        var testDiscoveryGlobs: [String]        // proves a test setup exists (else → scaffold)
+        var requiredTools: [ToolRequirement] = [] // toolchain that must be present to run build/test
+        static let none = BuildConfig(buildCommand: nil, testCommands: [], testScaffoldingHint: nil,
+                                      testDiscoveryGlobs: [], requiredTools: [])
+
+        /// Commands that gate review/merge by default — fast, no device required.
+        var fastTestCommands: [TestCommand] { testCommands.filter { $0.tier == .fast } }
+        /// Tools that must be present for the gate to even run (vs optional device tooling).
+        var requiredToolsForGate: [ToolRequirement] { requiredTools.filter { $0.required } }
+    }
+
+    struct TestCommand: Hashable, Sendable, Identifiable {
+        var id: String          // "unit", "instrumented"
+        var label: String       // "JVM unit tests"
+        var command: String     // "./gradlew testDebugUnitTest"
+        var tier: Tier          // .fast gates by default; .optional = device/slow, opt-in
+        var requiresDevice: Bool
+        enum Tier: Hashable, Sendable { case fast, optional }
+    }
+
+    /// A toolchain prerequisite for a mode (so Atelier can tell "tooling missing" from "tests red").
+    struct ToolRequirement: Hashable, Sendable, Identifiable {
+        var id: String          // "jdk", "android-sdk", "gradlew"
+        var label: String       // "Java JDK"
+        var probe: Probe
+        var installHint: String // how to install / configure
+        var required: Bool      // required to gate; false = optional (e.g. emulator for instrumented)
+
+        enum Probe: Hashable, Sendable {
+            case executable(String)        // resolvable as a command (matches how the test subprocess runs)
+            case fileInProject(String)     // relative path exists in the project root
+            case androidSdk                // ANDROID_HOME/ANDROID_SDK_ROOT / default location / local.properties
+        }
+    }
 
     // Common rules every profile inherits — read-only filesystem queries
     // inside the worktree, file globbing, grepping.
@@ -115,8 +167,33 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
             suggestedLabels: ["android", "kotlin", "compose"],
             description: "build.gradle.kts / settings.gradle.kts / AndroidManifest.xml.",
             defaultRules: baseReadOnlyRules + [
-                .init(tool: "Bash", pattern: "re:^\\./gradlew (assembleDebug|test|lint|build|tasks|projects)( |$)", behavior: .allow, reason: "Common gradle tasks", scope: .profile),
-            ]
+                .init(tool: "Bash", pattern: "re:^\\./gradlew (assembleDebug|test|testDebugUnitTest|connectedDebugAndroidTest|lint|build|tasks|projects|dependencies)( |$)", behavior: .allow, reason: "Common gradle tasks", scope: .profile),
+            ],
+            build: .init(
+                buildCommand: "./gradlew assembleDebug",
+                testCommands: [
+                    .init(id: "unit", label: "JVM unit tests",
+                          command: "./gradlew testDebugUnitTest", tier: .fast, requiresDevice: false),
+                    .init(id: "instrumented", label: "Instrumented tests",
+                          command: "./gradlew connectedDebugAndroidTest", tier: .optional, requiresDevice: true),
+                ],
+                testScaffoldingHint: "Unit tests live in src/test/java|kotlin (JVM, JUnit + MockK, run by ./gradlew testDebugUnitTest). Instrumented/UI tests live in src/androidTest and need a device/emulator. Write JVM unit tests FIRST; add an instrumented test only when the change is UI/integration a JVM test can't cover. If no test source set exists, create src/test/java/<pkg>/ and add the JUnit/MockK test dependencies if missing.",
+                testDiscoveryGlobs: ["**/src/test/**/*.kt", "**/src/test/**/*.java", "**/src/androidTest/**"],
+                requiredTools: [
+                    .init(id: "jdk", label: "Java JDK", probe: .executable("java"),
+                          installHint: "Install a JDK 17+ (e.g. `brew install --cask temurin`) so Gradle can run.",
+                          required: true),
+                    .init(id: "android-sdk", label: "Android SDK", probe: .androidSdk,
+                          installHint: "Install the Android SDK (Android Studio) and set ANDROID_HOME, or add `sdk.dir=…` to local.properties.",
+                          required: true),
+                    .init(id: "gradlew", label: "Gradle wrapper", probe: .fileInProject("gradlew"),
+                          installHint: "This repo has no ./gradlew wrapper — run `gradle wrapper` in the project root.",
+                          required: true),
+                    .init(id: "adb", label: "adb / emulator (instrumented only)", probe: .executable("adb"),
+                          installHint: "Needed only for `connectedDebugAndroidTest` (a running emulator/device). Optional for the JVM unit gate.",
+                          required: false),
+                ]
+            )
         ),
         .init(
             id: "docs",
