@@ -35,6 +35,12 @@ enum DossierBuilder {
             return "not run (app build is opt-in)"
         }()
 
+        // Coverage (informational, never a gate): if the mode declares a coverage command and the
+        // gate is green, re-run tests once with coverage collection and read the Cobertura line-rate.
+        let coverage = await measureCoverage(profile: profile, project: project,
+                                             worktreePath: worktreePath,
+                                             gateGreen: testResult.passed && testResult.ranAnything)
+
         // Part B (LLM). Best-effort: a failure still yields a useful Part A.
         let content = try? await AIAssistant.generateDossierContent(
             taskTitle: task.title,
@@ -45,7 +51,7 @@ enum DossierBuilder {
             testResultSummary: testResult.ranAnything ? testResult.summaryLine : "no automated tests for this mode",
             perCommand: perCommand,
             buildStatus: buildStatus,
-            coverage: nil,
+            coverage: coverage,
             modeHint: profile.build.testScaffoldingHint,
             reviewSummary: review?.summary,
             reviewFindings: (review?.findings ?? []).map(\.oneLine),
@@ -54,7 +60,7 @@ enum DossierBuilder {
             apiKey: apiKey)
 
         let md = render(task: task, profile: profile, changed: changed, testFiles: testFiles,
-                        testResult: testResult, buildStatus: buildStatus,
+                        testResult: testResult, buildStatus: buildStatus, coverage: coverage,
                         alignment: alignment, content: content)
         return TestDossier(taskId: task.id, taskTitle: task.title, costUsd: content?.costUsd ?? 0, markdown: md)
     }
@@ -89,6 +95,7 @@ enum DossierBuilder {
                                testFiles: [String],
                                testResult: TestRunner.Result,
                                buildStatus: String,
+                               coverage: String?,
                                alignment: AIAssistant.AlignmentVerdict?,
                                content: AIAssistant.DossierContent?) -> String {
         var md = "# Cahier de recette — \(task.title)\n\n"
@@ -98,6 +105,7 @@ enum DossierBuilder {
         md += "## Part A — Guaranteed by code & tests (no manual check needed)\n\n"
         md += "### Build & gate\n"
         md += "- Build: \(buildStatus)\n"
+        if let coverage { md += "- Coverage: \(coverage) — informational, not a gate\n" }
         if testResult.ranAnything {
             for c in testResult.perCommand {
                 md += "- Tests: \(c.passed ? "✅" : "❌") `\(c.command)` (\(Int(c.duration))s)\n"
@@ -165,5 +173,70 @@ enum DossierBuilder {
             }
         }
         return md
+    }
+
+    // MARK: - Coverage (informational)
+
+    /// Best-effort, INFORMATIONAL coverage for the recette. Re-runs the mode's coverage command once
+    /// (e.g. `dotnet test --collect:"XPlat Code Coverage"`, which writes Cobertura under TestResults/)
+    /// and reads the line-rate. Never a gate: any failure → nil. Only runs when the gate is green and
+    /// the mode declares a coverage command — so it never slows down a red/no-test feature.
+    private static func measureCoverage(profile: ProjectProfile, project: Project,
+                                        worktreePath: String, gateGreen: Bool) async -> String? {
+        guard gateGreen, let cmd = profile.build.coverageCommand else { return nil }
+        guard let outcome = await TestRunner.runCommand(cmd, worktreePath: worktreePath,
+                                                        profile: profile, mainRepoPath: project.path,
+                                                        timeoutSeconds: 900),
+              outcome.passed else { return nil }
+        return CoberturaParser.lineRateSummary(worktreePath: worktreePath)
+    }
+}
+
+/// Reads the newest `coverage.cobertura.xml` under a worktree and formats its `line-rate`. Coverlet
+/// (the `XPlat Code Coverage` collector) writes one per test project under `TestResults/<guid>/`.
+private enum CoberturaParser {
+    static func lineRateSummary(worktreePath: String) -> String? {
+        guard let file = newestCoverageFile(worktreePath: worktreePath),
+              let xml = try? String(contentsOfFile: file, encoding: .utf8) else { return nil }
+        // Root element: <coverage line-rate="0.8421" branch-rate="0.75" ...>
+        func rate(_ attr: String) -> Double? {
+            guard let r = xml.range(of: "\(attr)=\""),
+                  let end = xml[r.upperBound...].firstIndex(of: "\"") else { return nil }
+            return Double(xml[r.upperBound..<end])
+        }
+        // Reject non-finite values (e.g. malformed `line-rate="Infinity"`) → nil, honoring the
+        // "coverage is best-effort, any failure → nil" contract rather than printing "inf%"/"nan%".
+        guard let lines = rate("line-rate"), lines.isFinite else { return nil }
+        let linePct = String(format: "%.1f%%", lines * 100)
+        if let branches = rate("branch-rate"), branches.isFinite {
+            return "lines \(linePct), branches \(String(format: "%.1f%%", branches * 100)) (XPlat Code Coverage / coverlet)"
+        }
+        return "lines \(linePct) (XPlat Code Coverage / coverlet)"
+    }
+
+    private static func newestCoverageFile(worktreePath: String) -> String? {
+        let fm = FileManager.default
+        guard let en = fm.enumerator(at: URL(fileURLWithPath: worktreePath),
+                                     includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+                                     options: [.skipsHiddenFiles]) else { return nil }
+        // Coverlet writes <TestProject>/TestResults/<guid>/coverage.cobertura.xml — a SIBLING of, not
+        // inside, bin/obj. Prune the heavy build/dep dirs so we don't stat a whole artifact tree on
+        // every dossier (bin/obj alone can be thousands of files).
+        let pruned: Set<String> = ["bin", "obj", "node_modules", ".git"]
+        var best: (path: String, date: Date)?
+        for case let url as URL in en {
+            if pruned.contains(url.lastPathComponent),
+               (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                en.skipDescendants()
+                continue
+            }
+            guard url.lastPathComponent == "coverage.cobertura.xml" else { continue }
+            // Skip a file whose mtime is unreadable rather than dating it .distantPast — a placeholder
+            // date could wrongly win or lose against a readable file and select a stale report.
+            guard let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            else { continue }
+            if best == nil || date > best!.date { best = (url.path, date) }
+        }
+        return best?.path
     }
 }
