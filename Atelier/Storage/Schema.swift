@@ -182,6 +182,15 @@ enum Schema {
             }
         }
 
+        // v9 — opt-in soft coverage-improvement round (default off). When on and the integrated
+        // feature lands below the mode's coverage aim, the final synthesis adds one tests-first
+        // round. Never a gate — pure polish toward the target.
+        migrator.registerMigration("v9_project_coverage_round") { db in
+            try db.alter(table: "project") { t in
+                t.add(column: "coverageImprovementRound", .boolean).notNull().defaults(to: false)
+            }
+        }
+
         try migrator.migrate(pool)
     }
 }

@@ -45,8 +45,17 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
         /// Optional INFORMATIONAL coverage command (e.g. `dotnet test --collect:"XPlat Code Coverage"`).
         /// Never a gate — run best-effort at dossier time to fill the recette's coverage line. nil = none.
         var coverageCommand: String? = nil
+        /// SOFT coverage target (percent) the implementation AIMS for — woven into the decompose +
+        /// worker prompts and the final synthesis. NEVER a merge gate: below target only PROPOSES a
+        /// test-improvement round. nil here falls back to 90 whenever a `coverageCommand` exists
+        /// (see `coverageTarget`), so any mode that can measure coverage gets the ≥90% aim for free.
+        var coverageTargetPct: Int? = nil
         static let none = BuildConfig(buildCommand: nil, testCommands: [], testScaffoldingHint: nil,
                                       testDiscoveryGlobs: [], requiredTools: [])
+
+        /// The effective soft coverage aim: the explicit `coverageTargetPct`, else 90% when the mode
+        /// can measure coverage at all (`coverageCommand != nil`), else nil (mode can't measure it).
+        var coverageTarget: Int? { coverageTargetPct ?? (coverageCommand != nil ? 90 : nil) }
 
         /// Commands that gate review/merge by default — fast, no device required.
         var fastTestCommands: [TestCommand] { testCommands.filter { $0.tier == .fast } }

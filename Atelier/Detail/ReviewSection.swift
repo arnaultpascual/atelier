@@ -11,6 +11,8 @@ import UniformTypeIdentifiers
 struct ReviewSection: View {
     @Bindable var store: AppStore
     @Bindable var spawner: TaskSpawner
+    @Bindable var server: ApprovalServer
+    @Bindable var approvalQueue: ApprovalQueue
     let task: AtelierTask
     let project: Project
     var onIterate: (() -> Void)? = nil
@@ -37,6 +39,8 @@ struct ReviewSection: View {
     @State private var runningTests: Bool = false
     @State private var generatingDossier: Bool = false
     @State private var dossierURL: URL?
+    @State private var coverageRate: Double?       // 0…1, captured when a dossier is generated
+    @State private var coverageRounding: Bool = false
     @State private var alignment: AIAssistant.AlignmentVerdict?
     @State private var reviewingAlignment: Bool = false
     @State private var buildVerifying: Bool = false
@@ -401,6 +405,30 @@ struct ReviewSection: View {
                 Text("Two-part deliverable: Part A — covered by tests/code; Part B — manual QA checklist.")
                     .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
             }
+            if let rate = coverageRate, let target = modeProfile.build.coverageTarget,
+               rate * 100 + 0.05 < Double(target) {
+                coverageProposal(rate: rate, target: target)
+            }
+        }
+    }
+
+    /// Non-blocking proposal shown when a generated dossier measured coverage below the mode's aim.
+    /// Soft target: offers a tests-first round, never blocks anything.
+    @ViewBuilder
+    private func coverageProposal(rate: Double, target: Int) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            CalloutBanner(.info, "Coverage is \(String(format: "%.1f", rate * 100))%, below the ≥ \(target)% aim — a soft target that never blocks the merge. Add a round of tests?")
+            Button(action: runCoverageRound) {
+                HStack(spacing: 4) {
+                    if coverageRounding { ProgressView().controlSize(.mini) }
+                    else { Image(systemName: "chart.line.uptrend.xyaxis").font(.system(size: 10)) }
+                    Text(coverageRounding ? "Improving coverage…" : "Improve coverage")
+                        .font(AtelierFont.caption.weight(.medium))
+                }
+                .foregroundStyle(Color.atelierAccent)
+            }
+            .buttonStyle(.plain).disabled(coverageRounding || !worktreeExists)
+            .help("Resume the worker to add unit tests toward the aim, then re-run the gate and refresh the dossier.")
         }
     }
 
@@ -423,11 +451,59 @@ struct ReviewSection: View {
                 worktreePath: worktreePath, testResult: result, buildOutcome: nil,
                 review: nil, alignment: currentAlignment, apiKey: APIKeyResolver.resolve())
             let url = TestDossierStore.persist(dossier, projectPath: project.path)
+            // DossierBuilder.build just ran the coverage command (if the mode has one) — read the
+            // numeric rate it wrote, to drive the soft coverage-round proposal below.
+            let rate = DossierBuilder.coverageLineRate(worktreePath: worktreePath)
             await MainActor.run {
                 dossierURL = url
+                coverageRate = rate
                 generatingDossier = false
             }
         }
+    }
+
+    /// Spawns a tests-first round (resuming the task's session) to raise coverage toward the mode's
+    /// aim, then re-runs the gate, re-measures, and regenerates the dossier. Soft target — the task
+    /// stays where it is; this is polish, never a retroactive block.
+    private func runCoverageRound() {
+        guard worktreeExists, !coverageRounding,
+              let target = modeProfile.build.coverageTarget else { return }
+        coverageRounding = true
+        let profile = modeProfile
+        let current = (coverageRate ?? 0) * 100
+        Task {
+            guard let prior = try? await store.agentsForTask(task.id).first,
+                  prior.sessionId?.isEmpty == false else {
+                await MainActor.run { coverageRounding = false }
+                return
+            }
+            _ = await spawner.iterateAndAwait(
+                task: task, project: project, priorAgent: prior,
+                message: coverageRoundMessage(current: current, target: target),
+                apiKey: APIKeyResolver.resolve(), store: store, server: server,
+                approvalQueue: approvalQueue, autopilot: false)
+            // Keep the gate honest: re-run tests after the round, then refresh coverage + dossier.
+            let result = await TestRunner.runFastTests(profile: profile, worktreePath: worktreePath, mainRepoPath: project.path)
+            if var t = await store.freshTask(task.id) {
+                t.testState = result.toolchainMissing ? .toolchainMissing : (result.passed ? .green : .red)
+                t.testSummary = result.summaryLine
+                try? await store.updateTask(t)
+            }
+            await MainActor.run {
+                coverageRounding = false
+                generateDossierNow()   // re-measures coverage + rewrites the dossier (main-actor @State)
+            }
+        }
+    }
+
+    private func coverageRoundMessage(current: Double, target: Int) -> String {
+        """
+        Coverage on this task is \(String(format: "%.1f", current))%, below the \(target)% aim. Add
+        UNIT TESTS ONLY to raise it toward \(target)% — prioritise the least-covered, highest-risk
+        paths (error handling, edge cases, branches). Meaningful assertions only, never placeholder
+        tests, and don't weaken any existing test. Keep the suite green. This is a soft target, not a
+        gate — get as close as you reasonably can. Commit when done.
+        """
     }
 
     private func downloadDossier() {

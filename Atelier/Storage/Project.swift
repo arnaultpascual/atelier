@@ -17,6 +17,9 @@ struct Project: Identifiable, Hashable, Codable, Sendable, FetchableRecord, Muta
     var buildVerifyBeforeMerge: Bool = false
     /// Optional fast/local build target for verification; falls back to the mode's buildCommand.
     var verifyBuildCommand: String? = nil
+    /// Opt-in: when the final synthesis lands below the mode's coverage aim, run one tests-first
+    /// improvement round on the integration branch. OFF by default; NEVER a gate — pure polish.
+    var coverageImprovementRound: Bool = false
     var createdAt: Date
 
     static let databaseTableName = "project"
@@ -32,6 +35,7 @@ struct Project: Identifiable, Hashable, Codable, Sendable, FetchableRecord, Muta
         static let autoApproveLevel = Column(CodingKeys.autoApproveLevel)
         static let buildVerifyBeforeMerge = Column(CodingKeys.buildVerifyBeforeMerge)
         static let verifyBuildCommand = Column(CodingKeys.verifyBuildCommand)
+        static let coverageImprovementRound = Column(CodingKeys.coverageImprovementRound)
         static let createdAt = Column(CodingKeys.createdAt)
     }
 

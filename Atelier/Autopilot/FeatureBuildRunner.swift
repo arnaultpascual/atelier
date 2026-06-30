@@ -41,6 +41,8 @@ final class AutopilotRun {
     var integrationBranch: String = ""
     var originalBase: String = ""    // the branch the integration was cut from (for the combined diff / final merge)
     var lastError: String?
+    var synthesisCostUsd: Double = 0     // final FEATURE synthesis pass (re-test fix + conformity + deliverable)
+    var deliverablePath: String?         // <project>/FEATURE-<slug>.md once the synthesis writes it
     let startedAt = Date()
 
     @ObservationIgnored var loopTask: Task<Void, Never>?
@@ -49,10 +51,10 @@ final class AutopilotRun {
     @ObservationIgnored var autoResumeTask: Task<Void, Never>?
     var didAutoResume = false   // only one automatic attempt; after it, resumption is manual
 
-    /// Sum of every task's cost: worker chains (build + fix passes) in `costByTask`,
-    /// plus Opus review and conflict-resolution spend in `reviewCostByTask`.
+    /// Sum of every task's cost: worker chains (build + fix passes) in `costByTask`, plus Opus
+    /// review and conflict-resolution spend in `reviewCostByTask`, plus the final synthesis pass.
     var totalCostUsd: Double {
-        costByTask.values.reduce(0, +) + reviewCostByTask.values.reduce(0, +)
+        costByTask.values.reduce(0, +) + reviewCostByTask.values.reduce(0, +) + synthesisCostUsd
     }
 
     init(projectId: String, batchesRequested: Int, budgetCapUsd: Double?) {
@@ -248,6 +250,12 @@ final class FeatureBuildRunner {
             run.roundsCompleted += 1
         }
 
+        // Automatic final FEATURE pass: once everything runnable has merged, re-test the integration
+        // branch (+ bounded fix), check conformity to the demand, and write the deliverable at the
+        // project root. Only on a clean completion (not a user stop / usage pause); best-effort.
+        if run.status == .running {
+            await runFeatureSynthesis(run: run, deps: deps)
+        }
         if run.status == .running || run.status == .stopping { finish(run, .finished) }
     }
 
@@ -594,6 +602,150 @@ final class FeatureBuildRunner {
         run.reviewCostByTask[task.id, default: 0] += dossier.costUsd
     }
 
+    // MARK: - Feature synthesis (automatic final pass)
+
+    /// Runs ONCE when every runnable task has merged: re-tests the whole integrated feature on the
+    /// integration branch (with a bounded fix loop), measures final coverage, judges conformity to
+    /// the aggregated demand, and writes `FEATURE-<slug>.md` at the PROJECT ROOT. Best-effort — it
+    /// never fails the run; the deliverable reports honestly (incl. a still-red suite) if no fix lands.
+    private func runFeatureSynthesis(run: AutopilotRun, deps: Deps) async {
+        let merged: [AtelierTask] = run.taskPhases.compactMap { (id, phase) in
+            guard phase == .done, let t = deps.store.taskByID(id) else { return nil }
+            return t
+        }.sorted { $0.id < $1.id }
+        guard !merged.isEmpty else { return }   // nothing built → no deliverable
+
+        let blocked: [(task: AtelierTask, reason: String)] = run.taskPhases.compactMap { (id, phase) in
+            guard case .blocked(let reason) = phase, let t = deps.store.taskByID(id) else { return nil }
+            return (t, reason)
+        }.sorted { $0.task.id < $1.task.id }
+
+        // "Attente": tasks still To Do / In Progress that depend on a run-scoped task which never
+        // reached .done (it blocked or didn't finish) — so the dependency graph correctly never ran
+        // them. Surfaced in the deliverable so a stalled wait isn't silently invisible.
+        let runScope = Set(run.taskPhases.keys)
+        let allTasks = deps.store.tasks(in: deps.project.id)
+        let unfinishedScoped = Set(allTasks.filter { runScope.contains($0.id) && $0.status != .done }.map(\.id))
+        let stalled = allTasks.filter { t in
+            (t.status == .toDo || t.status == .inProgress) && !runScope.contains(t.id)
+                && t.dependsOn.contains { unfinishedScoped.contains($0) }
+        }.sorted { $0.id < $1.id }
+
+        let profile = modeProfile(deps)
+        // Merges + resume leave us on the integration branch, but be safe.
+        try? await GitService.checkoutBranch(projectPath: deps.project.path, branch: run.integrationBranch)
+
+        // (a) Re-test the whole integrated feature; bounded fix loop if red (tooling-missing is
+        // surfaced, not fixed). The integration branch is Atelier's own isolated branch, so the fix
+        // worker edits it in place (no worktree/merge dance).
+        var testResult: TestRunner.Result? = nil
+        if !profile.build.fastTestCommands.isEmpty {
+            var result = await TestRunner.runFastTests(profile: profile, worktreePath: deps.project.path, mainRepoPath: deps.project.path)
+            var pass = 0
+            while !result.passed && !result.toolchainMissing && pass < maxFixPasses && run.status == .running {
+                pass += 1
+                let outcome = await deps.spawner.runManagedWorker(
+                    label: "feature-fix",
+                    prompt: featureFixPrompt(result.summaryLine),
+                    workingDirectory: deps.project.path,
+                    project: deps.project, model: ModelRouter.latestOpus, apiKey: deps.apiKey,
+                    store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue)
+                run.synthesisCostUsd += outcome.costUsd
+                if outcome.looksUsageLimited { break }   // best-effort — don't pause the whole run for synthesis
+                result = await TestRunner.runFastTests(profile: profile, worktreePath: deps.project.path, mainRepoPath: deps.project.path)
+            }
+            testResult = result
+        }
+
+        // (a') optional build-verify (opt-in) on the integration branch.
+        var buildOutcome: TestRunner.CommandOutcome? = nil
+        if deps.project.buildVerifyBeforeMerge, let cmd = deps.project.resolvedVerifyBuildCommand(profile: profile) {
+            buildOutcome = await TestRunner.runCommand(cmd, worktreePath: deps.project.path, profile: profile, mainRepoPath: deps.project.path)
+        }
+
+        // Measure final coverage once (string for the deliverable + rate for the soft-round check).
+        var coverageStr: String? = nil
+        var coverageRate: Double? = nil
+        if (testResult?.passed ?? false), profile.build.coverageCommand != nil {
+            coverageStr = await DossierBuilder.measureCoverage(profile: profile, project: deps.project,
+                                                               worktreePath: deps.project.path, gateGreen: true)
+            coverageRate = DossierBuilder.coverageLineRate(worktreePath: deps.project.path)
+        }
+
+        // (3c) SOFT coverage-improvement round (opt-in): below the aim → one tests-first round on the
+        // integration branch (in place), then re-test (stay green) + re-measure. Never a gate.
+        if deps.project.coverageImprovementRound, run.status == .running,
+           let target = profile.build.coverageTarget, let rate = coverageRate, rate * 100 < Double(target) {
+            let outcome = await deps.spawner.runManagedWorker(
+                label: "coverage-round",
+                prompt: coverageRoundPrompt(current: rate * 100, target: target),
+                workingDirectory: deps.project.path,
+                project: deps.project, model: ModelRouter.latestOpus, apiKey: deps.apiKey,
+                store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue)
+            run.synthesisCostUsd += outcome.costUsd
+            if !outcome.looksUsageLimited {
+                let after = await TestRunner.runFastTests(profile: profile, worktreePath: deps.project.path, mainRepoPath: deps.project.path)
+                testResult = after
+                if after.passed {   // only adopt the new numbers if the suite is still green
+                    coverageStr = await DossierBuilder.measureCoverage(profile: profile, project: deps.project,
+                                                                       worktreePath: deps.project.path, gateGreen: true)
+                    coverageRate = DossierBuilder.coverageLineRate(worktreePath: deps.project.path)
+                }
+            }
+        }
+
+        // (b)+(c) conformity + recette + deliverable, written at the project root. Compute the
+        // review rollup here (on the actor) so the builder takes only plain Sendable values.
+        let reviewRollup = featureReviewRollup(run: run, mergedTasks: merged)
+        let deliverable = await FeatureDeliverable.build(
+            integrationBranch: run.integrationBranch, baseBranch: run.originalBase,
+            project: deps.project, profile: profile,
+            mergedTasks: merged, blockedTasks: blocked, stalledTasks: stalled, reviewRollup: reviewRollup,
+            testResult: testResult, buildOutcome: buildOutcome, coverage: coverageStr, apiKey: deps.apiKey)
+        run.synthesisCostUsd += deliverable.costUsd
+        let url = FeatureDeliverableStore.persist(deliverable, projectPath: deps.project.path)
+        run.deliverablePath = url.path
+        logger.notice("feature synthesis wrote \(url.lastPathComponent, privacy: .public)")
+    }
+
+    /// One-line review rollup across the merged tasks, from the per-task reports collected during
+    /// the run (read on the actor; passed to the deliverable builder as a plain string).
+    private func featureReviewRollup(run: AutopilotRun, mergedTasks: [AtelierTask]) -> String {
+        var blocking = 0, total = 0
+        for t in mergedTasks {
+            if let report = run.reportByTask[t.id] {
+                total += report.findings.count
+                blocking += report.blockingFindings.count
+            }
+        }
+        if total == 0 { return "no review findings recorded" }
+        return "\(total) finding(s) across tasks, \(blocking) were blocking (all resolved before merge)"
+    }
+
+    private func coverageRoundPrompt(current: Double, target: Int) -> String {
+        """
+        This feature's line coverage is \(String(format: "%.1f", current))%, below the \(target)% aim.
+        Add UNIT TESTS ONLY (no production-code changes unless a test reveals a real bug) to raise
+        coverage toward \(target)% — prioritise the least-covered, highest-risk paths: error handling,
+        edge cases, and branches. Write meaningful assertions, never trivial/placeholder tests. Keep
+        the whole suite green (the mode's test command must still exit 0). This is a soft target, not
+        a hard gate — get as close as you reasonably can without padding. Commit when done.
+        """
+    }
+
+    private func featureFixPrompt(_ summary: String) -> String {
+        """
+        You are finalizing a feature built across several tasks, now all merged on this branch (the
+        current directory). The integrated unit-test suite is RED — fix the code so the mode's test
+        command exits 0 across the WHOLE feature. This is a cross-task integration failure: a change
+        in one task likely broke another's test. Find the real cause and fix it. NEVER delete, skip,
+        @Ignore, or loosen a test to dodge a real failure. Keep all tests green. Commit when done.
+
+        Failure summary:
+        \(summary)
+        """
+    }
+
     private func block(_ task: AtelierTask, _ reason: String, run: AutopilotRun, deps: Deps) async {
         logger.warning("autopilot blocked \(task.id, privacy: .public): \(reason, privacy: .public)")
         writeAutopilotReport(task: task, project: deps.project, report: run.reportByTask[task.id], outcome: "Blocked — \(reason)")
@@ -818,7 +970,8 @@ final class FeatureBuildRunner {
                                         startedAt: run.startedAt,
                                         finishedAt: Date(),
                                         totalCostUsd: run.totalCostUsd,
-                                        tasks: tasks)
+                                        tasks: tasks,
+                                        deliverablePath: run.deliverablePath)
         AutopilotRunStore.append(record, projectPath: deps.project.path)
     }
 

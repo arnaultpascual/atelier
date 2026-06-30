@@ -17,6 +17,11 @@ struct AddProjectSheet: View {
     @State private var gitDetected: Bool = false
     @State private var detectedProfileId: String = ProjectProfile.generic.id
     @State private var detectionHits: [String] = []
+    @State private var toolchain: ToolchainChecker.Report?
+
+    private var selectedProfile: ProjectProfile { ProjectProfile.find(id: detectedProfileId) ?? .generic }
+    /// Re-probe the toolchain whenever the chosen folder OR mode changes (both feed the check).
+    private var toolchainTaskKey: String { "\(pickedURL?.path ?? "")|\(detectedProfileId)" }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -29,6 +34,10 @@ struct AddProjectSheet: View {
                 detailsForm(url: url)
                 Divider().background(Color.atelierDivider)
                 profileRow
+                if !selectedProfile.build.requiredTools.isEmpty {
+                    Divider().background(Color.atelierDivider)
+                    toolchainPreflight
+                }
                 Divider().background(Color.atelierDivider)
                 preview
             }
@@ -60,6 +69,29 @@ struct AddProjectSheet: View {
         .frame(width: 560)
         .background(Color.atelierBackground)
         .foregroundStyle(Color.atelierInk)
+        .task(id: toolchainTaskKey) {
+            // Preflight the mode's toolchain when a folder + mode are chosen, so the user is warned
+            // up front if the tests can't run (non-blocking — they can add anyway and fix later).
+            toolchain = nil
+            guard let url = pickedURL, !selectedProfile.build.requiredTools.isEmpty else { return }
+            toolchain = await ToolchainChecker.check(profile: selectedProfile, projectPath: url.path)
+        }
+    }
+
+    /// Non-blocking toolchain preflight shown at add time: the readiness panel + a soft "is that
+    /// expected?" warning when something required is missing. Adding stays enabled (Add anyway);
+    /// Cancel goes back; the per-tool install hints above point at how to fix it.
+    private var toolchainPreflight: some View {
+        let p = selectedProfile
+        return VStack(alignment: .leading, spacing: 8) {
+            ToolchainReadinessView(profile: p, report: toolchain)
+            if let r = toolchain, !r.ready {
+                CalloutBanner(.warning,
+                    "Heads up — \(r.missingSummary) missing for the \(p.name) test gate. Is that expected? "
+                    + "You can add the project anyway and install the tooling later (hints above), or pick another mode. "
+                    + "It only means autopilot can't run this mode's tests until the toolchain is present.")
+            }
+        }
     }
 
     private var header: some View {

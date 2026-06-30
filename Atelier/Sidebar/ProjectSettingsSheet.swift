@@ -115,6 +115,7 @@ private struct GeneralTab: View {
     @State private var draftAutoApprove: AutoApproveLevel = .off
     @State private var draftBuildVerify: Bool = false
     @State private var draftVerifyCommand: String = ""
+    @State private var draftCoverageRound: Bool = false
     @State private var saveError: String?
     @State private var savedOk: Bool = false
     @State private var toolchain: ToolchainChecker.Report?
@@ -293,7 +294,24 @@ private struct GeneralTab: View {
                         .foregroundStyle(Color.atelierInkSecondary)
                 }
             }
+
+            if let target = modeCoverageTarget {
+                field(label: "COVERAGE IMPROVEMENT ROUND") {
+                    Toggle(isOn: $draftCoverageRound) {
+                        Text("Add a tests-first round when below the ≥ \(target)% aim (opt-in)")
+                            .font(AtelierFont.caption)
+                    }
+                    .toggleStyle(.switch)
+                    Text("Off by default. When the finished feature lands below \(target)% line coverage, the final synthesis pass spawns one tests-first round on the integration branch to raise it. Soft target — it never blocks a merge.")
+                        .font(AtelierFont.caption)
+                        .foregroundStyle(Color.atelierInkSecondary)
+                }
+            }
         }
+    }
+
+    private var modeCoverageTarget: Int? {
+        (ProjectProfile.find(id: draftProfileId) ?? .generic).build.coverageTarget
     }
 
     private var modeBuildCommand: String? {
@@ -328,51 +346,13 @@ private struct GeneralTab: View {
                                     ? "gates review/merge"
                                     : (tc.requiresDevice ? "optional · needs device" : "optional"))
                 }
-                toolchainReadiness(p)
+                ToolchainReadinessView(profile: p, report: toolchain)
             }
             .padding(.top, 4)
         } else {
             Text("No build/test commands for this mode — TDD gating is informational.")
                 .font(AtelierFont.caption)
                 .foregroundStyle(Color.atelierInkSecondary.opacity(0.8))
-        }
-    }
-
-    /// Per-mode toolchain readiness — so the user sees, before launching, whether Atelier can
-    /// actually run this mode's tests (JDK / Android SDK / wrapper …).
-    @ViewBuilder
-    private func toolchainReadiness(_ p: ProjectProfile) -> some View {
-        if !p.build.requiredTools.isEmpty {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text("TOOLCHAIN").font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
-                    if let r = toolchain {
-                        Text(r.ready ? "ready" : "missing: \(r.missingSummary)")
-                            .font(AtelierFont.eyebrow)
-                            .foregroundStyle(r.ready ? Palette.success : Palette.warning)
-                    } else {
-                        ProgressView().controlSize(.mini)
-                    }
-                }
-                if let r = toolchain {
-                    ForEach(r.tools) { t in
-                        HStack(alignment: .top, spacing: 6) {
-                            Image(systemName: t.present ? "checkmark.circle.fill" : (t.required ? "xmark.octagon.fill" : "minus.circle"))
-                                .font(.system(size: 9))
-                                .foregroundStyle(t.present ? Palette.success : (t.required ? Palette.error : Color.atelierInkSecondary))
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("\(t.label)\(t.required ? "" : " (optional)")")
-                                    .font(AtelierFont.caption).foregroundStyle(Color.atelierInk)
-                                Text(t.present ? t.detail : t.installHint)
-                                    .font(AtelierFont.eyebrow)
-                                    .foregroundStyle(Color.atelierInkSecondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(.top, 4)
         }
     }
 
@@ -438,6 +418,7 @@ private struct GeneralTab: View {
         draftAutoApprove = project.autoApproveLevel ?? .off
         draftBuildVerify = project.buildVerifyBeforeMerge
         draftVerifyCommand = project.verifyBuildCommand ?? ""
+        draftCoverageRound = project.coverageImprovementRound
         saveError = nil
         savedOk = false
         // Open in read mode — user has to click the Name field to edit.
@@ -455,6 +436,7 @@ private struct GeneralTab: View {
         updated.buildVerifyBeforeMerge = draftBuildVerify
         let cmd = draftVerifyCommand.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.verifyBuildCommand = cmd.isEmpty ? nil : cmd
+        updated.coverageImprovementRound = draftCoverageRound
         Task {
             do {
                 try await store.updateProject(updated)

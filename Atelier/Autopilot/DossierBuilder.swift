@@ -181,8 +181,9 @@ enum DossierBuilder {
     /// (e.g. `dotnet test --collect:"XPlat Code Coverage"`, which writes Cobertura under TestResults/)
     /// and reads the line-rate. Never a gate: any failure → nil. Only runs when the gate is green and
     /// the mode declares a coverage command — so it never slows down a red/no-test feature.
-    private static func measureCoverage(profile: ProjectProfile, project: Project,
-                                        worktreePath: String, gateGreen: Bool) async -> String? {
+    /// Internal (not private) so the feature-level synthesis can reuse it on the integration branch.
+    static func measureCoverage(profile: ProjectProfile, project: Project,
+                                worktreePath: String, gateGreen: Bool) async -> String? {
         guard gateGreen, let cmd = profile.build.coverageCommand else { return nil }
         guard let outcome = await TestRunner.runCommand(cmd, worktreePath: worktreePath,
                                                         profile: profile, mainRepoPath: project.path,
@@ -190,11 +191,28 @@ enum DossierBuilder {
               outcome.passed else { return nil }
         return CoberturaParser.lineRateSummary(worktreePath: worktreePath)
     }
+
+    /// Numeric line-rate (0…1) from the newest Cobertura report already written under `worktreePath`
+    /// — reads a report a prior `measureCoverage` produced; does NOT run tests. nil = no/unreadable
+    /// report. Used by the soft coverage-improvement round to decide "below target?".
+    static func coverageLineRate(worktreePath: String) -> Double? {
+        CoberturaParser.lineRate(worktreePath: worktreePath)
+    }
 }
 
 /// Reads the newest `coverage.cobertura.xml` under a worktree and formats its `line-rate`. Coverlet
 /// (the `XPlat Code Coverage` collector) writes one per test project under `TestResults/<guid>/`.
 private enum CoberturaParser {
+    /// The root `line-rate` (0…1) of the newest report, or nil if absent/malformed/non-finite.
+    static func lineRate(worktreePath: String) -> Double? {
+        guard let file = newestCoverageFile(worktreePath: worktreePath),
+              let xml = try? String(contentsOfFile: file, encoding: .utf8),
+              let r = xml.range(of: "line-rate=\""),
+              let end = xml[r.upperBound...].firstIndex(of: "\""),
+              let v = Double(xml[r.upperBound..<end]), v.isFinite else { return nil }
+        return v
+    }
+
     static func lineRateSummary(worktreePath: String) -> String? {
         guard let file = newestCoverageFile(worktreePath: worktreePath),
               let xml = try? String(contentsOfFile: file, encoding: .utf8) else { return nil }

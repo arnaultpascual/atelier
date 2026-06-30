@@ -15,6 +15,9 @@ struct AutopilotRunRecord: Codable, Identifiable, Hashable, Sendable {
     var finishedAt: Date
     var totalCostUsd: Double
     var tasks: [TaskOutcome]
+    /// Absolute path to the auto-generated `FEATURE-<slug>.md` deliverable at the project root, when
+    /// the final synthesis pass produced one. Optional → older records decode cleanly.
+    var deliverablePath: String? = nil
 
     struct TaskOutcome: Codable, Hashable, Sendable, Identifiable {
         var id: String
