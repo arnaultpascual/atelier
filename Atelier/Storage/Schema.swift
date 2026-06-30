@@ -191,6 +191,24 @@ enum Schema {
             }
         }
 
+        // v10 — features: the unit the guided feature-first UX walks through (prerequisites → brief →
+        // tasks → build → finish). A project owns many features; the DB row is the source of truth.
+        migrator.registerMigration("v10_feature") { db in
+            try db.create(table: "feature") { t in
+                t.primaryKey("id", .text).notNull()
+                t.belongsTo("project", onDelete: .cascade).notNull()
+                t.column("name", .text).notNull()
+                t.column("stage", .text).notNull()
+                t.column("briefRoomId", .text)
+                t.column("integrationBranch", .text)
+                t.column("deliverablePath", .text)
+                t.column("completedAt", .datetime)
+                t.column("createdAt", .datetime).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
+            try db.create(index: "feature_project", on: "feature", columns: ["projectId"])
+        }
+
         try migrator.migrate(pool)
     }
 }

@@ -19,6 +19,7 @@ final class AppStore {
     private(set) var workspaces: [Workspace] = []
     private(set) var projectsByWorkspace: [String: [Project]] = [:]
     private(set) var tasksByProject: [String: [AtelierTask]] = [:]
+    private(set) var featuresByProject: [String: [Feature]] = [:]
     private(set) var chatRooms: [ChatRoom] = []
     private(set) var isLoaded: Bool = false
 
@@ -94,6 +95,22 @@ final class AppStore {
                     } catch {
                         await MainActor.run {
                             self.logger.error("chat observation failed: \(String(describing: error), privacy: .public)")
+                        }
+                    }
+                }
+                group.addTask { [weak self] in
+                    guard let self else { return }
+                    let obs = ValueObservation.tracking { db in
+                        try Feature.order(Feature.Columns.createdAt.asc).fetchAll(db)
+                    }
+                    do {
+                        for try await features in obs.values(in: self.db.dbPool) {
+                            let grouped = Dictionary(grouping: features, by: \.projectId)
+                            await MainActor.run { self.featuresByProject = grouped }
+                        }
+                    } catch {
+                        await MainActor.run {
+                            self.logger.error("feature observation failed: \(String(describing: error), privacy: .public)")
                         }
                     }
                 }
@@ -238,6 +255,46 @@ final class AppStore {
 
     func projectByID(_ id: String) -> Project? {
         projectsByWorkspace.values.flatMap { $0 }.first(where: { $0.id == id })
+    }
+
+    // MARK: - Features
+
+    /// A project's features, newest first (observation sorts by createdAt asc, so reverse here).
+    func features(in projectId: String) -> [Feature] {
+        (featuresByProject[projectId] ?? []).sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func featureByID(_ id: String) -> Feature? {
+        featuresByProject.values.flatMap { $0 }.first(where: { $0.id == id })
+    }
+
+    @discardableResult
+    func createFeature(in project: Project, name: String) async throws -> Feature {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        precondition(!trimmed.isEmpty, "Feature name must not be empty")
+        let feature = Feature.newDraft(projectId: project.id, name: trimmed)
+        try await db.write { db in
+            var copy = feature
+            try copy.insert(db)
+        }
+        return feature
+    }
+
+    /// Persists an updated Feature row (any field), stamping `updatedAt`.
+    func updateFeature(_ feature: Feature) async throws {
+        var draft = feature
+        draft.updatedAt = Date()
+        let final = draft
+        try await db.write { db in
+            var copy = final
+            try copy.update(db)
+        }
+    }
+
+    func deleteFeature(_ feature: Feature) async throws {
+        try await db.write { db in
+            _ = try Feature.filter(Feature.Columns.id == feature.id).deleteAll(db)
+        }
     }
 
     // MARK: - Task queries
