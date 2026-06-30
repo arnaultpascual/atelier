@@ -11,9 +11,15 @@ struct PreparePromptView: View {
     @Bindable var store: AppStore
     @Bindable var chatSpawner: ChatSpawner
     let project: Project
-    /// (briefText, attachments, inspectRepo) → seeds the Fill Kanban compose screen.
-    let onSendToFillKanban: (String, [URL], Bool) -> Void
-    let onClose: () -> Void
+    /// When set, the view works on this single brief only — no brief picker / New / Close / "Send to
+    /// Fill kanban" chrome and no fixed sheet frame — so it can be embedded inline (e.g. inside the
+    /// feature flow's Brief stage). nil = the standalone sheet behaviour.
+    var pinnedBriefId: String? = nil
+    /// (briefText, attachments, inspectRepo) → seeds the Fill Kanban compose screen. Unused when embedded.
+    var onSendToFillKanban: (String, [URL], Bool) -> Void = { _, _, _ in }
+    var onClose: () -> Void = {}
+
+    private var embedded: Bool { pinnedBriefId != nil }
 
     @State private var selectedBriefId: String?
     @State private var draft: String = ""
@@ -47,16 +53,17 @@ struct PreparePromptView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider().background(Color.atelierDivider).opacity(0.6)
+            if !embedded {
+                header
+                Divider().background(Color.atelierDivider).opacity(0.6)
+            }
             HStack(spacing: 0) {
                 conversationPane
                 Divider().background(Color.atelierDivider).opacity(0.6)
                 contextAndBriefRail.frame(width: 330)
             }
         }
-        .frame(minWidth: 860, idealWidth: 1000, maxWidth: 1300,
-               minHeight: 580, idealHeight: 740, maxHeight: 1000)
+        .modifier(EmbeddableFrame(embedded: embedded))
         .background(Color.atelierBackground)
         .onAppear { ensureBrief() }
         .onDisappear { persistBrief() }   // keep manual brief edits on close
@@ -332,7 +339,8 @@ struct PreparePromptView: View {
                     Text(refineStatus).font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
                 }
             }
-            Text("Edit freely. This is what gets sent to Fill kanban.")
+            Text(embedded ? "Edit freely. This is the brief that drives task decomposition."
+                          : "Edit freely. This is what gets sent to Fill kanban.")
                 .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
             TextEditor(text: $briefEditing)
                 .scrollContentBackground(.hidden)
@@ -341,19 +349,21 @@ struct PreparePromptView: View {
                 .padding(8)
                 .background(Color.atelierBackground, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.atelierDivider, lineWidth: 1))
-            Button(action: sendToKanban) {
-                HStack(spacing: 6) {
-                    Image(systemName: "wand.and.stars").font(.system(size: 11, weight: .semibold))
-                    Text("Send to Fill kanban").fontWeight(.semibold)
+            if !embedded {
+                Button(action: sendToKanban) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "wand.and.stars").font(.system(size: 11, weight: .semibold))
+                        Text("Send to Fill kanban").fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .foregroundStyle(.white)
+                    .background(briefReady ? Color.atelierAccent : Color.atelierInkSecondary.opacity(0.35),
+                                in: RoundedRectangle(cornerRadius: AtelierCorner.control))
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .foregroundStyle(.white)
-                .background(briefReady ? Color.atelierAccent : Color.atelierInkSecondary.opacity(0.35),
-                            in: RoundedRectangle(cornerRadius: AtelierCorner.control))
+                .buttonStyle(.plain).disabled(!briefReady)
+                .help("Open Fill kanban pre-filled with this brief, ready to decompose into tasks.")
             }
-            .buttonStyle(.plain).disabled(!briefReady)
-            .help("Open Fill kanban pre-filled with this brief, ready to decompose into tasks.")
         }
     }
 
@@ -364,6 +374,11 @@ struct PreparePromptView: View {
     // MARK: Actions
 
     private func ensureBrief() {
+        // Embedded (feature flow): bind to the one pinned brief, no picker.
+        if let pinned = pinnedBriefId {
+            if selectedBriefId != pinned, let room = store.chatRoom(id: pinned) { selectBrief(room) }
+            return
+        }
         if let id = selectedBriefId, store.chatRoom(id: id) != nil { return }
         if let first = store.briefRooms(in: project.id).first {
             selectBrief(first)
@@ -608,6 +623,20 @@ struct PreparePromptView: View {
 
     private func saveRoom(_ room: ChatRoom) {
         Task { try? await store.updateChatRoom(room) }
+    }
+}
+
+/// The standalone sheet fixes a roomy frame; embedded in the feature flow the view should size to
+/// its container instead. Applies the sheet frame only when NOT embedded.
+private struct EmbeddableFrame: ViewModifier {
+    let embedded: Bool
+    func body(content: Content) -> some View {
+        if embedded {
+            content
+        } else {
+            content.frame(minWidth: 860, idealWidth: 1000, maxWidth: 1300,
+                          minHeight: 580, idealHeight: 740, maxHeight: 1000)
+        }
     }
 }
 

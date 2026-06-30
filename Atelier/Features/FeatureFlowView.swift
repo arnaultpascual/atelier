@@ -53,7 +53,10 @@ struct FeatureFlowView: View {
             }
         }
         .background(Color.atelierBackground)
-        .task(id: viewedStage) { await loadToolchainIfNeeded() }
+        .task(id: viewedStage) {
+            await loadToolchainIfNeeded()
+            await ensureBriefRoomIfNeeded()
+        }
     }
 
     // MARK: Header + stepper
@@ -127,7 +130,8 @@ struct FeatureFlowView: View {
     private var stageContent: some View {
         switch viewedStage {
         case .prerequisites: prerequisitesStage
-        case .brief, .tasks, .building, .finish: placeholder(viewedStage)
+        case .brief: briefStage
+        case .tasks, .building, .finish: placeholder(viewedStage)
         }
     }
 
@@ -165,7 +169,32 @@ struct FeatureFlowView: View {
         }
     }
 
-    // ②–⑤ — placeholders until their phase wires the existing component.
+    // ② Brief — wired: the multi-pass refinement flow, scoped to this feature's brief room.
+    private var briefStage: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            stageHeading(.brief)
+            if let roomId = live.briefRoomId, store.chatRoom(id: roomId) != nil {
+                PreparePromptView(store: store, chatSpawner: chatSpawner, project: project, pinnedBriefId: roomId)
+                    .frame(height: 600)
+                    .background(Color.atelierSurface.opacity(0.25), in: RoundedRectangle(cornerRadius: AtelierCorner.card))
+                    .overlay(RoundedRectangle(cornerRadius: AtelierCorner.card).stroke(Color.atelierDivider, lineWidth: 1))
+            } else {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Setting up the brief workspace…").font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 200)
+            }
+            advanceBar(primaryTitle: "Continue to Tasks", canAdvance: briefReady)
+        }
+    }
+
+    private var briefReady: Bool {
+        guard let roomId = live.briefRoomId, let room = store.chatRoom(id: roomId) else { return false }
+        return !(room.briefText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    // ③–⑤ — placeholders until their phase wires the existing component.
     private func placeholder(_ s: Feature.Stage) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             stageHeading(s)
@@ -200,13 +229,17 @@ struct FeatureFlowView: View {
     // MARK: Advance / navigate
 
     @ViewBuilder
-    private func advanceBar(primaryTitle: String) -> some View {
-        HStack {
+    private func advanceBar(primaryTitle: String, canAdvance: Bool = true) -> some View {
+        HStack(spacing: 10) {
             if viewedStage.order < live.stage.order {
                 Button("Go to current stage (\(live.stage.label))") { viewedStage = live.stage }
                     .buttonStyle(.bordered)
                 Spacer()
             } else {
+                if !canAdvance, !advanceHint.isEmpty {
+                    Label(advanceHint, systemImage: "info.circle")
+                        .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                }
                 Spacer()
                 if let next = nextStage(after: viewedStage) {
                     Button(action: { advance(to: next) }) {
@@ -216,7 +249,7 @@ struct FeatureFlowView: View {
                             Image(systemName: "arrow.right")
                         }
                     }
-                    .buttonStyle(.borderedProminent).disabled(advancing)
+                    .buttonStyle(.borderedProminent).disabled(advancing || !canAdvance)
                 } else {
                     Button(action: completeFeature) {
                         HStack(spacing: 6) {
@@ -232,10 +265,23 @@ struct FeatureFlowView: View {
         .padding(.top, 8)
     }
 
+    private var advanceHint: String {
+        viewedStage == .brief ? "Write or refine the brief first." : ""
+    }
+
     private func nextStage(after s: Feature.Stage) -> Feature.Stage? {
         let all = Feature.Stage.allCases
         guard let i = all.firstIndex(of: s), i + 1 < all.count else { return nil }
         return all[i + 1]
+    }
+
+    /// Lazily create + link this feature's brief room when the user reaches the Brief stage.
+    private func ensureBriefRoomIfNeeded() async {
+        guard viewedStage == .brief, live.briefRoomId == nil else { return }
+        guard let room = try? await store.createBriefRoom(projectId: project.id) else { return }
+        var f = store.featureByID(feature.id) ?? feature
+        f.briefRoomId = room.id
+        try? await store.updateFeature(f)
     }
 
     private func advance(to next: Feature.Stage) {
