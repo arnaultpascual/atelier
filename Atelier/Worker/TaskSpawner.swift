@@ -232,9 +232,10 @@ final class TaskSpawner {
                          server: ApprovalServer,
                          approvalQueue: ApprovalQueue,
                          autopilot: Bool = false) async {
-        // 1. Ensure worktree
+        // 1. Ensure worktree (first ensure a base commit — a freshly-init'd repo has an unborn HEAD).
         let worktree: GitService.WorktreeInfo
         do {
+            try await GitService.ensureInitialCommit(projectPath: project.path)
             worktree = try await GitService.ensureWorktree(projectPath: project.path,
                                                            taskId: task.id)
         } catch {

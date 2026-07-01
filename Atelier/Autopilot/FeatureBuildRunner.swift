@@ -213,6 +213,11 @@ final class FeatureBuildRunner {
         // Resolve + guard the base branch.
         do {
             if run.integrationBranch.isEmpty {
+                // A freshly `git init`'d repo has no commits (unborn HEAD) — worktrees/branches need a
+                // base commit. Create one from the scaffold so the build can proceed.
+                if try await GitService.ensureInitialCommit(projectPath: deps.project.path) {
+                    logger.notice("created an initial commit (repo had no commits)")
+                }
                 let base = try await GitService.currentBranch(projectPath: deps.project.path)
                 guard base != "HEAD" else {
                     finish(run, .failed("Detached HEAD — check out a branch before running autopilot."))
