@@ -182,6 +182,49 @@ enum Schema {
             }
         }
 
+        // v9 — opt-in soft coverage-improvement round (default off). When on and the integrated
+        // feature lands below the mode's coverage aim, the final synthesis adds one tests-first
+        // round. Never a gate — pure polish toward the target.
+        migrator.registerMigration("v9_project_coverage_round") { db in
+            try db.alter(table: "project") { t in
+                t.add(column: "coverageImprovementRound", .boolean).notNull().defaults(to: false)
+            }
+        }
+
+        // v10 — features: the unit the guided feature-first UX walks through (prerequisites → brief →
+        // tasks → build → finish). A project owns many features; the DB row is the source of truth.
+        migrator.registerMigration("v10_feature") { db in
+            try db.create(table: "feature") { t in
+                t.primaryKey("id", .text).notNull()
+                t.belongsTo("project", onDelete: .cascade).notNull()
+                t.column("name", .text).notNull()
+                t.column("stage", .text).notNull()
+                t.column("briefRoomId", .text)
+                t.column("integrationBranch", .text)
+                t.column("deliverablePath", .text)
+                t.column("completedAt", .datetime)
+                t.column("createdAt", .datetime).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
+            try db.create(index: "feature_project", on: "feature", columns: ["projectId"])
+        }
+
+        // v11 — link a task to its feature (feature-first flow). Also written to the task's `.md`
+        // frontmatter as `feature_id` (source of truth), so it survives a disk re-import.
+        migrator.registerMigration("v11_task_feature") { db in
+            try db.alter(table: "task") { t in
+                t.add(column: "featureId", .text)
+            }
+        }
+
+        // v12 — opt-in FINAL app build (+ fix loop) on the integration branch, independent of the
+        // per-merge build verification. Default off; never a gate on unit tests.
+        migrator.registerMigration("v12_project_build_verify_final") { db in
+            try db.alter(table: "project") { t in
+                t.add(column: "buildVerifyFinal", .boolean).notNull().defaults(to: false)
+            }
+        }
+
         try migrator.migrate(pool)
     }
 }

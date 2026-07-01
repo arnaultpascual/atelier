@@ -19,6 +19,9 @@ final class AppStore {
     private(set) var workspaces: [Workspace] = []
     private(set) var projectsByWorkspace: [String: [Project]] = [:]
     private(set) var tasksByProject: [String: [AtelierTask]] = [:]
+    private(set) var tasksByFeature: [String: [AtelierTask]] = [:]   // O(1) feature-scoped lookups
+    private(set) var featuresByProject: [String: [Feature]] = [:]
+    private(set) var featuresById: [String: Feature] = [:]           // O(1) featureByID
     private(set) var chatRooms: [ChatRoom] = []
     private(set) var isLoaded: Bool = false
 
@@ -74,7 +77,12 @@ final class AppStore {
                     do {
                         for try await tasks in taskObservation.values(in: self.db.dbPool) {
                             let grouped = Dictionary(grouping: tasks, by: \.projectId)
-                            await MainActor.run { self.tasksByProject = grouped }
+                            let byFeature = Dictionary(grouping: tasks.filter { $0.featureId != nil },
+                                                       by: { $0.featureId! })
+                            await MainActor.run {
+                                self.tasksByProject = grouped
+                                self.tasksByFeature = byFeature
+                            }
                         }
                     } catch {
                         await MainActor.run {
@@ -94,6 +102,26 @@ final class AppStore {
                     } catch {
                         await MainActor.run {
                             self.logger.error("chat observation failed: \(String(describing: error), privacy: .public)")
+                        }
+                    }
+                }
+                group.addTask { [weak self] in
+                    guard let self else { return }
+                    let obs = ValueObservation.tracking { db in
+                        try Feature.order(Feature.Columns.createdAt.asc).fetchAll(db)
+                    }
+                    do {
+                        for try await features in obs.values(in: self.db.dbPool) {
+                            let grouped = Dictionary(grouping: features, by: \.projectId)
+                            let byId = Dictionary(features.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                            await MainActor.run {
+                                self.featuresByProject = grouped
+                                self.featuresById = byId
+                            }
+                        }
+                    } catch {
+                        await MainActor.run {
+                            self.logger.error("feature observation failed: \(String(describing: error), privacy: .public)")
                         }
                     }
                 }
@@ -236,8 +264,74 @@ final class AppStore {
         }
     }
 
+    /// Transactional read-modify-write of a project (reads the committed row inside the txn) so
+    /// rapid independent field toggles don't clobber each other off the lagging cache.
+    func updateProject(id: String, _ mutate: @escaping @Sendable (inout Project) -> Void) async throws {
+        try await db.write { db in
+            guard var p = try Project.filter(Project.Columns.id == id).fetchOne(db) else { return }
+            mutate(&p)
+            try p.update(db)
+        }
+    }
+
     func projectByID(_ id: String) -> Project? {
         projectsByWorkspace.values.flatMap { $0 }.first(where: { $0.id == id })
+    }
+
+    // MARK: - Features
+
+    /// A project's features, newest first (observation sorts by createdAt asc, so reverse here).
+    func features(in projectId: String) -> [Feature] {
+        (featuresByProject[projectId] ?? []).sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func featureByID(_ id: String) -> Feature? { featuresById[id] }
+
+    @discardableResult
+    func createFeature(in project: Project, name: String) async throws -> Feature {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        precondition(!trimmed.isEmpty, "Feature name must not be empty")
+        let feature = Feature.newDraft(projectId: project.id, name: trimmed)
+        try await db.write { db in
+            var copy = feature
+            try copy.insert(db)
+        }
+        return feature
+    }
+
+    /// Persists an updated Feature row (any field), stamping `updatedAt`.
+    func updateFeature(_ feature: Feature) async throws {
+        var draft = feature
+        draft.updatedAt = Date()
+        let final = draft
+        try await db.write { db in
+            var copy = final
+            try copy.update(db)
+        }
+    }
+
+    /// Transactional read-modify-write of a feature: reads the committed row INSIDE the write txn,
+    /// applies `mutate`, and saves — so a concurrent writer touching a different field isn't clobbered
+    /// by a full-row overwrite off the (possibly lagging) observation cache. No-op if the row is gone.
+    func updateFeature(id: String, _ mutate: @escaping @Sendable (inout Feature) -> Void) async throws {
+        try await db.write { db in
+            guard var f = try Feature.filter(Feature.Columns.id == id).fetchOne(db) else { return }
+            mutate(&f)
+            f.updatedAt = Date()
+            try f.update(db)
+        }
+    }
+
+    func deleteFeature(_ feature: Feature) async throws {
+        // Detach its tasks (clear featureId in the DB row + `.md` frontmatter) so none dangle at a
+        // now-missing feature. Callers should stop any in-flight run for this feature first.
+        for var t in tasks(inFeature: feature.id) {
+            t.featureId = nil
+            try? await updateTask(t)
+        }
+        try await db.write { db in
+            _ = try Feature.filter(Feature.Columns.id == feature.id).deleteAll(db)
+        }
     }
 
     // MARK: - Task queries
@@ -248,6 +342,11 @@ final class AppStore {
 
     func tasks(in projectId: String, status: AtelierTask.Status) -> [AtelierTask] {
         tasks(in: projectId).filter { $0.status == status }
+    }
+
+    /// A feature's tasks (feature-first flow), ordered by id for stable display.
+    func tasks(inFeature featureId: String) -> [AtelierTask] {
+        (tasksByFeature[featureId] ?? []).sorted { $0.id < $1.id }
     }
 
     func taskByID(_ id: String) -> AtelierTask? {
@@ -270,31 +369,68 @@ final class AppStore {
     func createTask(in project: Project,
                     title: String,
                     priority: AtelierTask.Priority? = nil,
-                    workerModel: String? = nil) async throws -> AtelierTask {
+                    workerModel: String? = nil,
+                    featureId: String? = nil) async throws -> AtelierTask {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         precondition(!trimmed.isEmpty, "Task title must not be empty")
+        let projectId = project.id
+        let model = workerModel ?? project.defaultModel
 
-        let existingIds = tasks(in: project.id).map(\.id)
-        let id = BacklogMD.nextId(existing: existingIds)
-        let filename = BacklogMD.filename(forId: id, title: trimmed)
-        let mdPath = "backlog/tasks/\(filename)"
-        let absolutePath = URL(fileURLWithPath: project.path).appendingPathComponent(mdPath).path
-
-        let draft = AtelierTask.newDraft(
-            id: id,
-            projectId: project.id,
-            title: trimmed,
-            mdPath: mdPath,
-            priority: priority,
-            workerModel: workerModel ?? project.defaultModel
-        )
-
-        try BacklogMD.write(task: draft, to: absolutePath)
-        try await db.write { db in
-            var copy = draft
-            try copy.insert(db)
+        // Allocate the id AND insert inside a single write transaction, reading the already-committed
+        // ids (not the async observation cache). Rapid/batch creates (e.g. decompose) otherwise all
+        // read a stale cache and collide on task.id (SQLite UNIQUE). GRDB serializes writes, so the
+        // max-id read + insert are atomic against concurrent creates.
+        let draft: AtelierTask = try await db.write { db in
+            // task.id is a GLOBAL primary key (unique across the whole table), so allocate against
+            // ALL task ids — not just this project's. A new/low-numbered project otherwise regenerates
+            // an id (task-001…) that already exists globally → SQLite UNIQUE on task.id.
+            let existing = try String.fetchAll(db, sql: "SELECT id FROM task")
+            let id = BacklogMD.nextId(existing: existing)
+            let mdPath = "backlog/tasks/\(BacklogMD.filename(forId: id, title: trimmed))"
+            var d = AtelierTask.newDraft(id: id, projectId: projectId, title: trimmed,
+                                         mdPath: mdPath, priority: priority, workerModel: model)
+            d.featureId = featureId
+            try d.insert(db)
+            return d
         }
+        // Write the .md file once the row (and its id) is committed.
+        try BacklogMD.write(task: draft, to: draft.absoluteMdPath(projectRoot: project.path))
         return draft
+    }
+
+    /// Persists a batch of `AIAssistant.TaskDraft`s in two passes: create every task (recording each
+    /// draft's ref → real id), then resolve `depends_on` refs to real ids. Shared by Fill Kanban and
+    /// the feature flow's decompose stage. `featureId` stamps every created task (feature-first flow).
+    @discardableResult
+    func createTasks(fromDrafts drafts: [AIAssistant.TaskDraft],
+                     in project: Project,
+                     featureId: String? = nil) async throws -> [AtelierTask] {
+        var refToId: [String: String] = [:]
+        var created: [(draft: AIAssistant.TaskDraft, task: AtelierTask)] = []
+        for draft in drafts {
+            var task = try await createTask(in: project,
+                                            title: draft.title,
+                                            priority: draft.priority,
+                                            workerModel: draft.workerModel,
+                                            featureId: featureId)
+            if !draft.descriptionMd.isEmpty { task.descriptionMd = draft.descriptionMd }
+            if !draft.labels.isEmpty { task.labels = draft.labels }
+            if !draft.descriptionMd.isEmpty || !draft.labels.isEmpty {
+                try await updateTask(task)
+            }
+            if let ref = draft.ref { refToId[ref] = task.id }
+            created.append((draft, task))
+        }
+        for entry in created where !entry.draft.dependsOnRefs.isEmpty {
+            let deps = entry.draft.dependsOnRefs
+                .compactMap { refToId[$0] }
+                .filter { $0 != entry.task.id }
+            guard !deps.isEmpty else { continue }
+            var t = entry.task
+            t.dependsOn = Array(Set(deps))
+            try await updateTask(t)
+        }
+        return created.map(\.task)
     }
 
     /// Re-writes the .md file and updates the DB row.
@@ -416,6 +552,7 @@ final class AppStore {
                     budgetUsd: parsed.budgetUsd,
                     descriptionMd: parsed.body.isEmpty ? nil : parsed.body,
                     attachments: parsed.attachments,
+                    featureId: parsed.featureId,
                     testState: parsed.testState,
                     testSummary: parsed.testSummary,
                     testIntegrity: parsed.testIntegrity,

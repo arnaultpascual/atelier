@@ -30,6 +30,15 @@ enum ProjectProfileDetector {
                     appleMarkers + (set.contains("Package.swift") ? ["Package.swift"] : []))
         }
 
+        // .NET (C#/F#) — solution/project files & build markers (top-level, like the others)
+        let dotnetSuffixes = [".sln", ".slnx", ".csproj", ".fsproj"]
+        let dotnetMarkerFiles = ["global.json", "Directory.Build.props"]
+        let dotnetHits = entries.filter { e in dotnetSuffixes.contains(where: e.hasSuffix) }
+            + dotnetMarkerFiles.filter(set.contains)
+        if !dotnetHits.isEmpty {
+            return (profile(id: "dotnet"), dotnetHits)
+        }
+
         // package.json — branch into web vs node
         if set.contains("package.json") {
             let pkg = url.appendingPathComponent("package.json")
@@ -79,7 +88,8 @@ enum ProjectProfileDetector {
 
     private static func isCodeFile(_ name: String) -> Bool {
         let codeExts = [".swift", ".ts", ".tsx", ".js", ".jsx", ".py", ".rs", ".go",
-                        ".rb", ".php", ".java", ".kt", ".c", ".cpp", ".h", ".m", ".mm"]
+                        ".rb", ".php", ".java", ".kt", ".c", ".cpp", ".h", ".m", ".mm",
+                        ".cs", ".fs"]
         return codeExts.contains(where: name.hasSuffix)
     }
 }

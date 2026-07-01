@@ -286,6 +286,8 @@ struct TaskDetailView: View {
                 if let project = selectedProject {
                     ReviewSection(store: store,
                                   spawner: spawner,
+                                  server: server,
+                                  approvalQueue: approvalQueue,
                                   task: task,
                                   project: project,
                                   onIterate: { iterating = true })

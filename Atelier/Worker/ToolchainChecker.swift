@@ -52,6 +52,21 @@ enum ToolchainChecker {
             out["ANDROID_HOME"] = sdk
             out["ANDROID_SDK_ROOT"] = sdk
         }
+        let needsDotnet = profile.build.requiredTools.contains {
+            if case .dotnetSdk = $0.probe { return true }; return false
+        }
+        if needsDotnet, let bin = resolvedDotnetBinary() {
+            if let root = resolvedDotnetRoot() { out["DOTNET_ROOT"] = root }
+            // The gate runs bare `dotnet test`, but a Finder-launched GUI app doesn't inherit the
+            // shell PATH, so `dotnet` wouldn't resolve. We can't hand back a `$PATH`-relative value:
+            // TestRunner.envPrefix single-quotes export values (so `$PATH` wouldn't expand), and the
+            // worker consumes the same map as a raw env dict (no shell at all). So resolve PATH
+            // CONCRETELY here — prepend dotnet's dir to the inherited PATH — which is correct for both
+            // the single-quoted test prefix and the worker's env dict.
+            let dir = URL(fileURLWithPath: bin).deletingLastPathComponent().path
+            let base = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+            out["PATH"] = dir + ":" + base
+        }
         return out
     }
 
@@ -73,6 +88,8 @@ enum ToolchainChecker {
                 return (true, sdk)
             }
             return (false, "no ANDROID_HOME, ~/Library/Android/sdk, or local.properties sdk.dir")
+        case .dotnetSdk:
+            return await probeDotnetSdk()
         }
     }
 
@@ -130,6 +147,104 @@ enum ToolchainChecker {
             if !dir.isEmpty { return dir }
         }
         return nil
+    }
+
+    // MARK: - .NET SDK resolution
+
+    /// Resolves a runnable `dotnet` host. A GUI app doesn't inherit the shell PATH, so we probe the
+    /// well-known install locations directly (matching how the gate finds it once we prepend its dir
+    /// to PATH). Search: DOTNET_ROOT → ~/.dotnet → /usr/local/share/dotnet → Homebrew → system bins.
+    static func resolvedDotnetBinary() -> String? {
+        let fm = FileManager.default
+        let env = ProcessInfo.processInfo.environment
+        var candidates: [String] = []
+        if let root = env["DOTNET_ROOT"], !root.isEmpty { candidates.append(root + "/dotnet") }
+        candidates.append(NSHomeDirectory() + "/.dotnet/dotnet")
+        candidates.append("/usr/local/share/dotnet/dotnet")
+        candidates.append("/opt/homebrew/share/dotnet/dotnet")
+        candidates.append("/usr/local/bin/dotnet")
+        candidates.append("/opt/homebrew/bin/dotnet")
+        candidates.append("/usr/bin/dotnet")
+        for p in candidates where fm.isExecutableFile(atPath: p) { return p }
+        return nil
+    }
+
+    /// `DOTNET_ROOT` we export so the host finds `sdk/` and `shared/`. Prefer an explicit env value;
+    /// else derive the install root from the resolved binary. We VALIDATE the candidate actually holds
+    /// an `sdk/` dir and walk up a few levels for bin/-shim layouts (e.g. Homebrew's
+    /// …/Cellar/dotnet/X/bin/dotnet, where the binary is NOT directly at the root). If we can't find a
+    /// real root, return nil and export nothing — the host self-locates from the binary on PATH, and a
+    /// bogus DOTNET_ROOT (missing sdk/) would actively BREAK resolution, worse than leaving it unset.
+    static func resolvedDotnetRoot() -> String? {
+        let env = ProcessInfo.processInfo.environment
+        if let root = env["DOTNET_ROOT"], !root.isEmpty, isDotnetRoot(root) { return root }
+        guard let bin = resolvedDotnetBinary() else { return nil }
+        var dir = URL(fileURLWithPath: bin).resolvingSymlinksInPath().deletingLastPathComponent()
+        for _ in 0..<3 {
+            if isDotnetRoot(dir.path) { return dir.path }
+            dir = dir.deletingLastPathComponent()
+        }
+        return nil
+    }
+
+    /// A .NET install root is a directory containing an `sdk` subdirectory (next to `shared/`, `host/`).
+    private static func isDotnetRoot(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        let sdk = URL(fileURLWithPath: path).appendingPathComponent("sdk").path
+        return FileManager.default.fileExists(atPath: sdk, isDirectory: &isDir) && isDir.boolValue
+    }
+
+    /// Probe for `.dotnetSdk`: a `dotnet` host exists AND at least one SDK with major ≥ 8 (8.x or
+    /// 10.x) is installed. Surfaces the preferred (highest, so 10 over 8) version in `detail`.
+    private static func probeDotnetSdk() async -> (Bool, String) {
+        guard let bin = resolvedDotnetBinary() else {
+            return (false, "no `dotnet` host (checked DOTNET_ROOT, ~/.dotnet, /usr/local/share/dotnet, Homebrew, system bins)")
+        }
+        let sdks = await listDotnetSdks(binary: bin)        // e.g. ["8.0.404 [..]", "10.0.100 [..]"]
+        let majors = sdks.compactMap(dotnetSdkMajor)
+        guard let chosen = majors.filter({ $0 >= 8 }).max() else {   // highest major: prefer 10 over 8
+            if sdks.isEmpty {
+                return (false, "`dotnet` at \(bin) but no SDK installed — install .NET 8 or 10 (`dotnet --list-sdks`)")
+            }
+            let found = Set(majors).sorted().map(String.init).joined(separator: ", ")
+            return (false, "`dotnet` SDK major(s) \(found) found, need ≥ 8 — install .NET 8 or 10")
+        }
+        let line = sdks.first(where: { dotnetSdkMajor($0) == chosen }) ?? ""
+        let version = line.split(separator: " ").first.map(String.init) ?? "\(chosen).x"
+        return (true, "SDK \(version) (\(bin))")
+    }
+
+    /// Parses the major version from a `dotnet --list-sdks` line ("8.0.404 [/path/sdk]" → 8).
+    private static func dotnetSdkMajor(_ line: String) -> Int? {
+        let version = line.split(separator: " ").first.map(String.init) ?? line
+        return version.split(separator: ".").first.flatMap { Int($0) }
+    }
+
+    /// Runs `<dotnet> --list-sdks` and returns its non-empty lines. Best-effort (errors → []). Runs
+    /// the resolved binary directly with `.inherit`, like `resolveExecutable`'s `command -v` probe;
+    /// the host self-locates its SDKs from its own path.
+    private static func listDotnetSdks(binary: String) async -> [String] {
+        let collector = LineSink()
+        do {
+            _ = try await Subprocess.run(
+                .path(FilePath(binary)),
+                arguments: Arguments(["--list-sdks"]),
+                environment: .inherit,
+                workingDirectory: FilePath(NSHomeDirectory()),
+                body: { execution, inputWriter, stdout, stderr in
+                    try await inputWriter.finish()
+                    for try await line in stdout.lines() { await collector.append(line) }
+                    for try await _ in stderr.lines() {}
+                    _ = execution
+                }
+            )
+        } catch {
+            return []
+        }
+        let text = await collector.value
+        return text.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 }
 

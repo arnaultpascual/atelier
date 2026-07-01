@@ -42,8 +42,20 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
         var testScaffoldingHint: String?        // one line injected into decompose + worker prompts
         var testDiscoveryGlobs: [String]        // proves a test setup exists (else → scaffold)
         var requiredTools: [ToolRequirement] = [] // toolchain that must be present to run build/test
+        /// Optional INFORMATIONAL coverage command (e.g. `dotnet test --collect:"XPlat Code Coverage"`).
+        /// Never a gate — run best-effort at dossier time to fill the recette's coverage line. nil = none.
+        var coverageCommand: String? = nil
+        /// SOFT coverage target (percent) the implementation AIMS for — woven into the decompose +
+        /// worker prompts and the final synthesis. NEVER a merge gate: below target only PROPOSES a
+        /// test-improvement round. nil here falls back to 90 whenever a `coverageCommand` exists
+        /// (see `coverageTarget`), so any mode that can measure coverage gets the ≥90% aim for free.
+        var coverageTargetPct: Int? = nil
         static let none = BuildConfig(buildCommand: nil, testCommands: [], testScaffoldingHint: nil,
                                       testDiscoveryGlobs: [], requiredTools: [])
+
+        /// The effective soft coverage aim: the explicit `coverageTargetPct`, else 90% when the mode
+        /// can measure coverage at all (`coverageCommand != nil`), else nil (mode can't measure it).
+        var coverageTarget: Int? { coverageTargetPct ?? (coverageCommand != nil ? 90 : nil) }
 
         /// Commands that gate review/merge by default — fast, no device required.
         var fastTestCommands: [TestCommand] { testCommands.filter { $0.tier == .fast } }
@@ -72,6 +84,7 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
             case executable(String)        // resolvable as a command (matches how the test subprocess runs)
             case fileInProject(String)     // relative path exists in the project root
             case androidSdk                // ANDROID_HOME/ANDROID_SDK_ROOT / default location / local.properties
+            case dotnetSdk                 // a `dotnet` host is resolvable AND an SDK major ≥ 8 (8.x/10.x) is installed
         }
     }
 
@@ -193,6 +206,32 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
                           installHint: "Needed only for `connectedDebugAndroidTest` (a running emulator/device). Optional for the JVM unit gate.",
                           required: false),
                 ]
+            )
+        ),
+        .init(
+            id: "dotnet",
+            name: ".NET (C#)",
+            iconSystemName: "number.square",
+            defaultModel: ModelRouter.latestOpus,
+            suggestedLabels: ["dotnet", "csharp"],
+            description: "*.sln / *.slnx / *.csproj / *.fsproj / global.json / Directory.Build.props.",
+            defaultRules: baseReadOnlyRules + [
+                .init(tool: "Bash", pattern: "re:^dotnet (build|test|restore|run|format|new|sln|add|nuget|vstest|--list-sdks|--list-runtimes|--info|--version)( |$)", behavior: .allow, reason: "Common dotnet CLI commands", scope: .profile),
+            ],
+            build: .init(
+                buildCommand: "dotnet build -c Debug",
+                testCommands: [
+                    .init(id: "unit", label: "Unit tests",
+                          command: "dotnet test --nologo", tier: .fast, requiresDevice: false),
+                ],
+                testScaffoldingHint: "Unit tests live in a test project (xUnit/NUnit/MSTest) — typically *Tests.csproj / *.Tests.csproj or a test/ folder — and run with `dotnet test`. Write the failing test FIRST. If the repo has NO test project, scaffold one: `dotnet new xunit -o <Name>.Tests`, add a reference to the system-under-test (`dotnet add <Name>.Tests reference <Sut>.csproj`), and add it to the solution (`dotnet sln add`). The gate is `dotnet test` — it compiles the test project, which is fine; it is NOT a publish/app build.",
+                testDiscoveryGlobs: ["**/*Tests/**/*.cs", "**/*.Tests/**/*.cs", "**/test/**/*.cs"],
+                requiredTools: [
+                    .init(id: "dotnet", label: ".NET SDK (8 or 10)", probe: .dotnetSdk,
+                          installHint: "Install the .NET SDK 8 or 10 (https://dotnet.microsoft.com/download) — `dotnet` must be runnable.",
+                          required: true),
+                ],
+                coverageCommand: "dotnet test --nologo --collect:\"XPlat Code Coverage\""
             )
         ),
         .init(

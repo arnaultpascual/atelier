@@ -141,6 +141,86 @@ final class TaskSpawner {
         return run
     }
 
+    // MARK: - Managed worker (not task-bound)
+
+    /// Outcome of a `runManagedWorker` run — a write-capable worker not tied to a kanban task.
+    struct ManagedOutcome: Sendable {
+        let completed: Bool
+        let costUsd: Double
+        let looksUsageLimited: Bool
+    }
+
+    /// Runs a write-capable, approval-gated worker in `workingDirectory` on whatever branch is
+    /// checked out there — WITHOUT a worktree, Agent row, or task-status side effects. Used by the
+    /// feature synthesis pass to fix the integration branch in place (that branch is Atelier's own
+    /// isolated `atelier/autopilot-…`, never the user's main/develop). Mirrors `execute`'s approval
+    /// wiring (socket + MCP config + rules) in autopilot auto-accept mode.
+    func runManagedWorker(label: String,
+                          prompt: String,
+                          workingDirectory: String,
+                          additionalDirs: [String] = [],
+                          project: Project,
+                          model: String,
+                          apiKey: String,
+                          store: AppStore,
+                          server: ApprovalServer,
+                          approvalQueue: ApprovalQueue,
+                          maxTurns: Int = 60) async -> ManagedOutcome {
+        let profile = ProjectProfile.find(id: project.profileId) ?? .generic
+        let agentId = UUID()
+        let listener = ApprovalSocketListener(agentId: agentId.uuidString,
+                                              taskId: "feature-synthesis",
+                                              projectName: project.name,
+                                              queue: approvalQueue)
+        let socketPath: String
+        do {
+            socketPath = try await listener.start()
+        } catch {
+            logger.error("managed worker socket failed: \(error.localizedDescription, privacy: .public)")
+            return ManagedOutcome(completed: false, costUsd: 0, looksUsageLimited: false)
+        }
+        approvalQueue.loadRules(forAgent: agentId.uuidString, project: project, worktreePath: workingDirectory)
+        approvalQueue.setAutopilot(true, forAgent: agentId.uuidString)
+        let configURL: URL
+        do {
+            configURL = try MCPConfig.writeTemporaryConfig(serverName: server.serverName,
+                                                           agentId: agentId, socketPath: socketPath)
+        } catch {
+            await listener.stop(reason: "config write failed")
+            logger.error("managed worker config failed: \(error.localizedDescription, privacy: .public)")
+            return ManagedOutcome(completed: false, costUsd: 0, looksUsageLimited: false)
+        }
+        var dirs = additionalDirs
+        if !dirs.contains(project.path) { dirs.append(project.path) }
+        let runner = WorkerRunner()
+        let invocation = WorkerRunner.Invocation(
+            prompt: prompt, model: model, apiKey: apiKey, agentId: agentId,
+            settingsPath: configURL.path, workingDirectory: workingDirectory,
+            additionalDirs: dirs, includePartialMessages: false, maxTurns: maxTurns,
+            resumeSessionId: nil,
+            extraEnv: ToolchainChecker.environmentExports(profile: profile, mainRepoPath: project.path))
+        let state = AgentState(); state.reset()
+        let liveState = state
+        let eventSink: @Sendable (StreamEvent) async -> Void = { event in
+            await MainActor.run { liveState.ingest(event) }
+        }
+        let stderrSink: @Sendable (String) async -> Void = { line in
+            await MainActor.run { liveState.appendStderr(line) }
+        }
+        var ok = true
+        do {
+            try await runner.run(invocation: invocation, onEvent: eventSink, onStderr: stderrSink)
+        } catch {
+            ok = false
+            if liveState.status != .completed { liveState.markFailed(error.localizedDescription) }
+        }
+        MCPConfig.cleanup(configURL)
+        await listener.stop(reason: "managed worker finished")
+        return ManagedOutcome(completed: ok && liveState.status == .completed,
+                              costUsd: liveState.totalCostUsd,
+                              looksUsageLimited: liveState.looksUsageLimited)
+    }
+
     // MARK: - Internals
 
     private func execute(task: AtelierTask,
@@ -152,9 +232,10 @@ final class TaskSpawner {
                          server: ApprovalServer,
                          approvalQueue: ApprovalQueue,
                          autopilot: Bool = false) async {
-        // 1. Ensure worktree
+        // 1. Ensure worktree (first ensure a base commit — a freshly-init'd repo has an unborn HEAD).
         let worktree: GitService.WorktreeInfo
         do {
+            try await GitService.ensureInitialCommit(projectPath: project.path)
             worktree = try await GitService.ensureWorktree(projectPath: project.path,
                                                            taskId: task.id)
         } catch {
@@ -612,6 +693,9 @@ final class TaskSpawner {
                 "Whenever you change ANY test, declare it: write `.atelier/test-changes/\(task.id).md` with, per change — the test, what changed, and WHY the design changed. Atelier diffs your test files; if the suite shrank or no declaration is found, a reviewer reads that file + the diff to decide legitimate-evolution vs weakening, and unexplained weakening blocks the merge."
             ]
             if let hint = b.testScaffoldingHint { tdd.append(hint) }
+            if let target = b.coverageTarget {
+                tdd.append("Aim for ≥ \(target)% line coverage on the code you add/change — a SOFT target, not a gate: write tests that meaningfully exercise the new behavior (happy path + edge cases). Being under it never blocks the merge; it only suggests an extra test round.")
+            }
             sections.append(tdd.joined(separator: "\n"))
         }
 

@@ -57,6 +57,10 @@ struct ChatRoom: Identifiable, Hashable, Codable, Sendable, FetchableRecord, Mut
 }
 
 extension ChatRoom {
+    /// The living brief file Claude reads + edits during a Prepare-Prompt conversation (feature flow).
+    /// Lives in the room's Atelier-owned scratch dir — never in the user's repo.
+    var briefFileURL: URL { URL(fileURLWithPath: scratchPath).appendingPathComponent("brief.md") }
+
     static func scratchRoot() -> URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())

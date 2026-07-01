@@ -128,15 +128,27 @@ struct MainView: View {
             ChatsView(store: store, spawner: chatSpawner)
                 .navigationSplitViewColumnWidth(min: 720, ideal: 1000)
         case .project(let id):
-            BacklogPane(store: store,
-                        spawner: spawner,
-                        server: server,
-                        approvalQueue: approvalQueue,
-                        featureRunner: featureRunner,
-                        chatSpawner: chatSpawner,
-                        selectedProjectID: id,
-                        selectedTaskID: $selectedTaskID)
-                .navigationSplitViewColumnWidth(min: 560, ideal: 800)
+            if let project = store.projectByID(id) {
+                ProjectFeaturesView(store: store,
+                                    spawner: spawner,
+                                    server: server,
+                                    approvalQueue: approvalQueue,
+                                    featureRunner: featureRunner,
+                                    chatSpawner: chatSpawner,
+                                    project: project,
+                                    selectedTaskID: $selectedTaskID)
+                    .navigationSplitViewColumnWidth(min: 560, ideal: 800)
+            } else {
+                BacklogPane(store: store,
+                            spawner: spawner,
+                            server: server,
+                            approvalQueue: approvalQueue,
+                            featureRunner: featureRunner,
+                            chatSpawner: chatSpawner,
+                            selectedProjectID: id,
+                            selectedTaskID: $selectedTaskID)
+                    .navigationSplitViewColumnWidth(min: 560, ideal: 800)
+            }
         case nil:
             BacklogPane(store: store,
                         spawner: spawner,

@@ -31,6 +31,10 @@ enum GitService {
         case conflict(files: [String])   // merge left unmerged paths (MERGE_HEAD in progress)
     }
 
+    /// Branches we never merge onto automatically — callers offer a feature branch instead.
+    /// Single source of truth for the manual-merge guards (ReviewSection, FeatureFlowView).
+    static let protectedBranches: Set<String> = ["main", "master", "develop", "development", "trunk", "release"]
+
     enum Error: Swift.Error, LocalizedError {
         case gitNotFound
         case notARepo(String)
@@ -327,6 +331,32 @@ enum GitService {
         let r = try await runGit(args: ["rev-parse", "--abbrev-ref", "HEAD"], workingDirectory: projectPath)
         guard r.success else { throw Error.commandFailed("git rev-parse --abbrev-ref HEAD", stderr: r.stderr) }
         return r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// True when the repo has at least one commit (HEAD resolves). A freshly `git init`'d repo has an
+    /// UNBORN HEAD — worktrees and branches can't be cut until there's a first commit.
+    static func hasCommits(projectPath: String) async -> Bool {
+        let r = try? await runGit(args: ["rev-parse", "--verify", "--quiet", "HEAD"], workingDirectory: projectPath)
+        return r?.success ?? false
+    }
+
+    /// Guarantees a base commit so worktrees/branches can be created. If HEAD is unborn, stages
+    /// everything and makes an initial commit (a fresh scaffold is expected to be committed — this is
+    /// non-destructive). Returns true if it created one. Throws with a clear message if the repo is
+    /// truly empty (nothing to commit) so the caller can tell the user to add project files first.
+    @discardableResult
+    static func ensureInitialCommit(projectPath: String) async throws -> Bool {
+        if await hasCommits(projectPath: projectPath) { return false }
+        let add = try await runGit(args: ["add", "-A"], workingDirectory: projectPath)
+        guard add.success else { throw Error.commandFailed("git add -A", stderr: add.stderr) }
+        let commit = try await runGit(args: ["commit", "-m", "Initial commit (Atelier)"], workingDirectory: projectPath)
+        guard commit.success else {
+            let hint = commit.stderr.isEmpty
+                ? "the repository has no files to commit — add your project files, then retry"
+                : commit.stderr
+            throw Error.commandFailed("git commit (initial)", stderr: hint)
+        }
+        return true
     }
 
     /// True when the given repo's working tree has no uncommitted changes.

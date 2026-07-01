@@ -377,12 +377,15 @@ enum AIAssistant {
         let modeSection: String
         if !b.fastTestCommands.isEmpty {
             let testCmds = b.fastTestCommands.map(\.command).joined(separator: " && ")
+            let coverageLine = b.coverageTarget.map {
+                "\n- Coverage AIM ≥ \($0)% (SOFT target, never a gate): each task's acceptance criteria should require the new behavior to be meaningfully covered by the tests it writes. Below target only PROPOSES an extra test round later — it never blocks the merge."
+            } ?? ""
             modeSection = """
 
 
             Mode test conventions for \(profile.name):
             - Tests (MUST pass green before review/merge): \(testCmds)
-            \(b.testScaffoldingHint.map { "- \($0)" } ?? "")
+            \(b.testScaffoldingHint.map { "- \($0)" } ?? "")\(coverageLine)
             This project uses STRICT TDD. Every task's "## Acceptance criteria" MUST require writing \
             the test(s) FIRST and the test command above passing green. Atelier runs that command in \
             the worktree and blocks review/merge on a non-zero exit. Do NOT require building/assembling \
@@ -491,7 +494,7 @@ enum AIAssistant {
                                              maxTurns: turns,
                                              apiKey: apiKey,
                                              repoPath: repoPath,
-                                             timeoutSeconds: repoPath == nil ? 120 : 240,
+                                             timeoutSeconds: repoPath == nil ? 120 : 420,
                                              onActivity: onActivity)
         }
         return try parseTaskDrafts(raw)
@@ -1346,6 +1349,128 @@ enum AIAssistant {
                                               why: (d["why"] as? String) ?? "")
         }
         return out
+    }
+
+    // MARK: - Feature synthesis (final conformity + recette across all merged tasks)
+
+    /// The LLM-authored parts of the FEATURE deliverable: a conformity verdict against the whole
+    /// feature demand (the union of the merged tasks' briefs + acceptance criteria), a per-criterion
+    /// automated/partial/manual classification, the aggregated manual-QA checklist, and a short
+    /// technical summary + feature title. Part A (run results, coverage, changed files) is assembled
+    /// deterministically in Swift, never here.
+    struct FeatureSynthesisContent: Sendable {
+        let featureTitle: String          // short human title → deliverable file slug
+        let summary: String               // 1-paragraph "what was built" technical rollup
+        let answersTheDemand: Bool        // does the integrated work satisfy the feature demand?
+        let conformityRationale: String   // 1-3 sentences
+        let gaps: [String]                // unmet / partial aspects (empty = fully met)
+        var criteria: [DossierContent.Criterion] = []
+        var manualChecks: [DossierContent.ManualCheck] = []
+        var costUsd: Double = 0
+    }
+
+    /// One pass over the INTEGRATED feature (the diff of the integration branch vs its base, read in
+    /// the project root) judging conformity to the aggregated demand and enumerating the manual
+    /// recette. Read-only. Opus by default — conformity-to-the-original-demand is the headline
+    /// judgment of the deliverable, and this runs once per feature (not per task), so it's affordable.
+    static func synthesizeFeature(demand: String,
+                                  acceptanceCriteria: [String],
+                                  changedFiles: [String],
+                                  testSummary: String,
+                                  coverage: String?,
+                                  coverageTarget: Int?,
+                                  buildStatus: String,
+                                  reviewRollup: String,
+                                  baseBranch: String,
+                                  projectPath: String,
+                                  model: String = ModelRouter.latestOpus,
+                                  apiKey: String? = nil) async throws -> FeatureSynthesisContent {
+        let crit = acceptanceCriteria.isEmpty ? "(none stated)" : acceptanceCriteria.prefix(40).map { "- \($0)" }.joined(separator: "\n")
+        let files = changedFiles.isEmpty ? "(none)" : changedFiles.prefix(80).joined(separator: ", ")
+        let cov = coverage ?? "not measured"
+        let target = coverageTarget.map { " (soft aim ≥ \($0)%)" } ?? ""
+        let prompt = """
+        You are writing the FINAL synthesis for a feature an autopilot just built across several
+        tasks, all merged into the integration branch checked out in the current directory. Judge the
+        WHOLE feature against the demand, and split user-visible behavior into what's already
+        guaranteed by code/tests vs. what a human must verify by hand.
+
+        Inspect the ACTUAL integrated change: run `git diff \(baseBranch)...HEAD` and read the changed
+        files, so your judgments describe the REAL behavior — not boilerplate.
+
+        THE FEATURE DEMAND (union of the merged tasks' briefs):
+        \"\"\"
+        \(demand.isEmpty ? "(no briefs)" : demand)
+        \"\"\"
+        Aggregated acceptance criteria (verbatim):
+        \(crit)
+
+        WHAT THE MACHINE ALREADY VERIFIED (facts — do not contradict):
+        - Integration test suite: \(testSummary)
+        - Coverage: \(cov)\(target)
+        - Build: \(buildStatus)
+        - Changed files: \(files)
+        - Per-task review rollup: \(reviewRollup)
+
+        Output ONLY this JSON object — no prose, no fences:
+        {
+          "feature_title": "<= 8 words naming the feature (for a filename)",
+          "summary": "one paragraph: what was implemented across the tasks, in plain technical language",
+          "answers_the_demand": true,
+          "conformity_rationale": "1-3 sentences: does the integrated work satisfy the demand? what, if anything, is missing",
+          "gaps": ["any required aspect of the demand not (fully) met — empty if fully met"],
+          "criteria": [
+            {"text":"<verbatim acceptance criterion>","coverage":"automated|partial|manual","evidence":"which test guarantees it, or why only a human can judge it"}
+          ],
+          "manual_checks": [
+            {"category":"ui|device|integration|visual|performance|accessibility|security|edgeCase|dataMigration",
+             "title":"user-observable behavior a human must exercise","how_to":"numbered steps a non-developer tester follows in the running app","why":"one line: why code/tests can't guarantee this"}
+          ]
+        }
+
+        manual_checks = the FEATURE recette: dedupe across tasks, keep only what code/tests cannot
+        guarantee (perceptual/visual, interactive feel, real device/external integration, performance,
+        accessibility, end-to-end journeys). EXCLUDE anything a passing test or the type system already
+        guarantees. Imperative, concrete, no preamble.
+        """
+        let (raw, cost) = try await askJSONWithCost(prompt: prompt, model: model, maxTurns: 14,
+                                                    apiKey: apiKey, repoPath: projectPath)
+        var content = parseFeatureSynthesis(raw)
+        content.costUsd = cost
+        return content
+    }
+
+    private static func parseFeatureSynthesis(_ raw: String) -> FeatureSynthesisContent {
+        let stripped = stripCodeFences(raw)
+        let jsonText: String
+        if let lo = stripped.firstIndex(of: "{"), let hi = stripped.lastIndex(of: "}"), lo < hi {
+            jsonText = String(stripped[lo...hi])
+        } else { jsonText = stripped }
+        guard let data = jsonText.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return FeatureSynthesisContent(featureTitle: "", summary: "", answersTheDemand: false,
+                                           conformityRationale: "Could not parse the synthesis review.", gaps: [])
+        }
+        let title = (obj["feature_title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let summary = (obj["summary"] as? String) ?? ""
+        let answers = (obj["answers_the_demand"] as? Bool) ?? false
+        let rationale = (obj["conformity_rationale"] as? String) ?? ""
+        let gaps = ((obj["gaps"] as? [Any]) ?? [])
+            .compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0.lowercased() != "none" }
+        var content = FeatureSynthesisContent(featureTitle: title, summary: summary,
+                                              answersTheDemand: answers, conformityRationale: rationale, gaps: gaps)
+        content.criteria = ((obj["criteria"] as? [[String: Any]]) ?? []).compactMap { d in
+            guard let text = (d["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+            return DossierContent.Criterion(text: text, coverage: (d["coverage"] as? String) ?? "manual",
+                                            evidence: (d["evidence"] as? String) ?? "")
+        }
+        content.manualChecks = ((obj["manual_checks"] as? [[String: Any]]) ?? []).compactMap { d in
+            guard let title = (d["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else { return nil }
+            return DossierContent.ManualCheck(category: (d["category"] as? String) ?? "edgeCase", title: title,
+                                              howTo: (d["how_to"] as? String) ?? "", why: (d["why"] as? String) ?? "")
+        }
+        return content
     }
 
     // MARK: - Autopilot: merge-conflict resolver

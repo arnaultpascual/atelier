@@ -11,18 +11,37 @@ struct PreparePromptView: View {
     @Bindable var store: AppStore
     @Bindable var chatSpawner: ChatSpawner
     let project: Project
-    /// (briefText, attachments, inspectRepo) → seeds the Fill Kanban compose screen.
-    let onSendToFillKanban: (String, [URL], Bool) -> Void
-    let onClose: () -> Void
+    /// When set, the view works on this single brief only — no brief picker / New / Close / "Send to
+    /// Fill kanban" chrome and no fixed sheet frame — so it can be embedded inline (e.g. inside the
+    /// feature flow's Brief stage). nil = the standalone sheet behaviour.
+    var pinnedBriefId: String? = nil
+    /// (briefText, attachments, inspectRepo) → seeds the Fill Kanban compose screen. Unused when embedded.
+    var onSendToFillKanban: (String, [URL], Bool) -> Void = { _, _, _ in }
+    var onClose: () -> Void = {}
+
+    private var embedded: Bool { pinnedBriefId != nil }
 
     @State private var selectedBriefId: String?
     @State private var draft: String = ""
     @State private var briefEditing: String = ""
+    // Embedded (feature flow): the brief is a LIVE FILE (`brief.md` in the room scratch dir) that
+    // Claude edits as the conversation evolves — we render it read-only, no copy-paste.
+    @State private var briefFileContent: String = ""
+    @State private var briefPreviewCollapsed: Bool = false
     @State private var attachments: [URL] = []
     @State private var webEnabled: Bool = false
     @State private var newLink: String = ""
     @State private var historyMessages: [ChatMessage] = []
-    @State private var awaitingDistill: Bool = false
+    // Multi-pass refinement loop: each pass critiques + rewrites the brief and emits a convergence
+    // signal; the loop stops on stability (no open questions, no material change), a pass cap, or a
+    // user stop. Driven off `onChange(of: liveRunning)` so it reuses the brief's resumable session.
+    @State private var refining: Bool = false
+    @State private var refinePass: Int = 0
+    @State private var refineStop: Bool = false
+    @State private var refineConverged: Bool = false
+    @State private var refineStatus: String = ""
+    @State private var refinePrevBrief: String = ""
+    private let maxRefinePasses = 4
 
     private var profile: ProjectProfile { ProjectProfile.find(id: project.profileId) ?? .generic }
     private var selectedRoom: ChatRoom? {
@@ -38,26 +57,26 @@ struct PreparePromptView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider().background(Color.atelierDivider).opacity(0.6)
+            if !embedded {
+                header
+                Divider().background(Color.atelierDivider).opacity(0.6)
+            }
             HStack(spacing: 0) {
                 conversationPane
                 Divider().background(Color.atelierDivider).opacity(0.6)
                 contextAndBriefRail.frame(width: 330)
             }
         }
-        .frame(minWidth: 860, idealWidth: 1000, maxWidth: 1300,
-               minHeight: 580, idealHeight: 740, maxHeight: 1000)
+        .modifier(EmbeddableFrame(embedded: embedded))
         .background(Color.atelierBackground)
         .onAppear { ensureBrief() }
         .onDisappear { persistBrief() }   // keep manual brief edits on close
         .onChange(of: liveRunning) { _, running in
-            // When a "Distill" reply lands, capture it into the brief editor.
-            guard !running, awaitingDistill,
-                  let last = liveTurn?.messages.last, last.role == .assistant else { return }
-            briefEditing = last.text
-            awaitingDistill = false
-            persistBrief()
+            guard !running else { return }
+            // Claude may have edited brief.md this turn — refresh the live preview.
+            if embedded { loadBriefFile() }
+            // A refinement pass just finished — judge convergence, loop or stop.
+            if refining { handleRefinePassFinished() }
         }
     }
 
@@ -144,12 +163,30 @@ struct PreparePromptView: View {
                 .font(.system(size: 28)).foregroundStyle(Color.atelierInkSecondary.opacity(0.5))
             Text("Describe the feature and pin context")
                 .font(AtelierFont.subtitle).foregroundStyle(Color.atelierInk)
-            Text("Claude will ask questions and keep a distilled brief. Pin folders, links and files in the right rail. When the brief is solid, send it to Fill kanban.")
+            Text("Bring everything that defines the feature — a functional spec (what it should do), a technical brief (constraints, stack), reference links, screenshots/mockups, and spec files. Pin the codebase folders it touches so the brief and tasks reference real files. Claude asks questions, then Refine converges a testable, TDD-ready brief you send to Fill kanban.")
                 .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
-                .multilineTextAlignment(.center).frame(maxWidth: 420)
+                .multilineTextAlignment(.center).frame(maxWidth: 440)
+            HStack(spacing: 10) {
+                inputHint("doc.text", "Spec / brief")
+                inputHint("photo", "Images")
+                inputHint("link", "Links")
+                inputHint("folder", "Codebase")
+            }
+            .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(24)
+    }
+
+    private func inputHint(_ icon: String, _ label: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon).font(.system(size: 9))
+            Text(label).font(AtelierFont.eyebrow)
+        }
+        .foregroundStyle(Color.atelierInkSecondary)
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(Color.atelierSurface.opacity(0.5), in: Capsule())
+        .overlay(Capsule().stroke(Color.atelierDivider, lineWidth: 1))
     }
 
     private var composer: some View {
@@ -254,8 +291,9 @@ struct PreparePromptView: View {
                 }
             }
 
-            Text("Files & images: use the ＋ in the composer to attach them to your next message.")
+            Text("Spec docs, screenshots & files: attach them with ＋ in the composer (images are read as images, text/PDF is extracted). Pinned folders persist across passes; attachments ride along with the message you send.")
                 .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary.opacity(0.8))
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -277,49 +315,129 @@ struct PreparePromptView: View {
             HStack {
                 Text("BRIEF").font(AtelierFont.eyebrow.weight(.semibold)).foregroundStyle(Color.atelierInk)
                 Spacer()
-                Button(action: distill) {
-                    HStack(spacing: 4) {
-                        if awaitingDistill { ProgressView().controlSize(.mini) }
-                        else { Image(systemName: "sparkles").font(.system(size: 10)) }
-                        Text("Distill").font(AtelierFont.caption.weight(.medium))
+                if refining {
+                    Button(action: requestStopRefining) {
+                        HStack(spacing: 4) {
+                            ProgressView().controlSize(.mini)
+                            Text("Stop").font(AtelierFont.caption.weight(.medium))
+                        }
+                        .foregroundStyle(Color.atelierInkSecondary)
                     }
-                    .foregroundStyle(Color.atelierAccent)
+                    .buttonStyle(.plain)
+                    .help("Stop refining after the current pass.")
+                } else {
+                    Button(action: startRefinement) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "sparkles").font(.system(size: 10))
+                            Text(refineConverged ? "Refine again" : "Refine").font(AtelierFont.caption.weight(.medium))
+                        }
+                        .foregroundStyle(Color.atelierAccent)
+                    }
+                    .buttonStyle(.plain).disabled(liveRunning || selectedRoom == nil)
+                    .help("Critique and rewrite the brief over multiple passes until it stabilises (testable acceptance, strict TDD\(profile.build.coverageTarget.map { ", ≥\($0)% coverage aim" } ?? "")).")
                 }
-                .buttonStyle(.plain).disabled(liveRunning || selectedRoom == nil)
-                .help("Ask Claude to output the consolidated brief, then load it here.")
             }
-            Text("Edit freely. This is what gets sent to Fill kanban.")
-                .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
-            TextEditor(text: $briefEditing)
-                .scrollContentBackground(.hidden)
-                .font(.system(.callout, design: .monospaced))
-                .frame(minHeight: 200, maxHeight: 360)
-                .padding(8)
+            if !refineStatus.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: refineConverged ? "checkmark.seal.fill" : (refining ? "arrow.triangle.2.circlepath" : "info.circle"))
+                        .font(.system(size: 9))
+                        .foregroundStyle(refineConverged ? Palette.success : Color.atelierInkSecondary)
+                    Text(refineStatus).font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                }
+            }
+            if embedded {
+                briefFilePreview
+            } else {
+                Text("Edit freely. This is what gets sent to Fill kanban.")
+                    .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                TextEditor(text: $briefEditing)
+                    .scrollContentBackground(.hidden)
+                    .font(.system(.callout, design: .monospaced))
+                    .frame(minHeight: 200, maxHeight: 360)
+                    .padding(8)
+                    .background(Color.atelierBackground, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.atelierDivider, lineWidth: 1))
+                Button(action: sendToKanban) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "wand.and.stars").font(.system(size: 11, weight: .semibold))
+                        Text("Send to Fill kanban").fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .foregroundStyle(.white)
+                    .background(briefReady ? Color.atelierAccent : Color.atelierInkSecondary.opacity(0.35),
+                                in: RoundedRectangle(cornerRadius: AtelierCorner.control))
+                }
+                .buttonStyle(.plain).disabled(!briefReady)
+                .help("Open Fill kanban pre-filled with this brief, ready to decompose into tasks.")
+            }
+        }
+    }
+
+    /// Live, read-only preview of `brief.md` — Claude keeps it up to date as you chat (no copy-paste).
+    private var briefFilePreview: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("brief.md — Claude keeps this up to date as you chat")
+                    .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                    .lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 4)
+                Menu {
+                    Button("Open in default editor") { openBriefFile(with: nil) }
+                    let editors = detectedEditors
+                    if !editors.isEmpty {
+                        Divider()
+                        ForEach(editors, id: \.self) { ed in
+                            Button("Open in \(ed.name)") { openBriefFile(with: ed.url) }
+                        }
+                    }
+                    Divider()
+                    Button("Reveal in Finder") { revealBriefFile() }
+                } label: {
+                    Image(systemName: "square.and.pencil").font(.system(size: 10))
+                }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .foregroundStyle(Color.atelierInkSecondary)
+                .help("Open brief.md in your editor")
+                Button { briefPreviewCollapsed.toggle() } label: {
+                    Image(systemName: briefPreviewCollapsed ? "chevron.down" : "chevron.up").font(.system(size: 10))
+                }
+                .buttonStyle(.plain).foregroundStyle(Color.atelierInkSecondary)
+                .help(briefPreviewCollapsed ? "Show the brief" : "Hide the brief")
+            }
+            if !briefPreviewCollapsed {
+                ScrollView {
+                    if briefFileContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("The brief will appear here as you describe the feature — Claude writes and refines brief.md for you.")
+                            .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary.opacity(0.7))
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                    } else {
+                        MarkdownView(source: briefFileContent)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                    }
+                }
+                .frame(minHeight: 220, maxHeight: 400)
                 .background(Color.atelierBackground, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.atelierDivider, lineWidth: 1))
-            Button(action: sendToKanban) {
-                HStack(spacing: 6) {
-                    Image(systemName: "wand.and.stars").font(.system(size: 11, weight: .semibold))
-                    Text("Send to Fill kanban").fontWeight(.semibold)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .foregroundStyle(.white)
-                .background(briefReady ? Color.atelierAccent : Color.atelierInkSecondary.opacity(0.35),
-                            in: RoundedRectangle(cornerRadius: AtelierCorner.control))
             }
-            .buttonStyle(.plain).disabled(!briefReady)
-            .help("Open Fill kanban pre-filled with this brief, ready to decompose into tasks.")
         }
     }
 
     private var briefReady: Bool {
-        !briefEditing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        embedded ? !briefFileContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                 : !briefEditing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     // MARK: Actions
 
     private func ensureBrief() {
+        // Embedded (feature flow): bind to the one pinned brief, no picker; the brief is a live file.
+        if let pinned = pinnedBriefId {
+            if selectedBriefId != pinned, let room = store.chatRoom(id: pinned) { selectBrief(room) }
+            ensureBriefFile()
+            loadBriefFile()
+            return
+        }
         if let id = selectedBriefId, store.chatRoom(id: id) != nil { return }
         if let first = store.briefRooms(in: project.id).first {
             selectBrief(first)
@@ -341,7 +459,7 @@ struct PreparePromptView: View {
         selectedBriefId = room.id
         briefEditing = room.briefText ?? ""
         attachments = []
-        awaitingDistill = false
+        resetRefineState()
         // Load prior conversation from disk if there's no live turn for this room.
         historyMessages = []
         if chatSpawner.turn(for: room.id) == nil, let sid = room.sessionId {
@@ -353,6 +471,8 @@ struct PreparePromptView: View {
         guard let room = selectedRoom else { return }
         let msg = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !msg.isEmpty else { return }
+        // New info supersedes a prior convergence — clear the stale "stable" note.
+        if refineConverged || !refineStatus.isEmpty { refineConverged = false; refineStatus = "" }
         let firstTurn = (room.sessionId == nil) && messages.isEmpty
         let text = firstTurn ? framingPreamble(room) + "\n\nMy request:\n" + msg : msg
         let pins = room.contextPaths
@@ -361,29 +481,188 @@ struct PreparePromptView: View {
                          store: store,
                          attachments: attachments,
                          allowWeb: webEnabled || !room.contextLinks.isEmpty,
+                         allowFileEdit: embedded,   // embedded: Claude maintains brief.md live
                          contextPath: pins.first,
                          extraDirs: Array(pins.dropFirst()))
         draft = ""
         attachments = []
     }
 
-    private func distill() {
-        guard let room = selectedRoom, !liveRunning else { return }
-        awaitingDistill = true
+    // MARK: Living brief file (embedded feature flow)
+
+    private func ensureBriefFile() {
+        guard let room = selectedRoom else { return }
+        // The scratch dir is the worker's cwd — make sure it exists so `brief.md` + Reveal work.
+        try? FileManager.default.createDirectory(atPath: room.scratchPath, withIntermediateDirectories: true)
+    }
+
+    private func loadBriefFile() {
+        guard let room = selectedRoom else { briefFileContent = ""; return }
+        briefFileContent = (try? String(contentsOf: room.briefFileURL, encoding: .utf8)) ?? ""
+    }
+
+    private func revealBriefFile() {
+        guard let room = selectedRoom else { return }
+        let url = room.briefFileURL
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: room.scratchPath)])
+        }
+    }
+
+    /// A text editor installed on this Mac, offered in the "Open in…" menu.
+    private struct EditorApp: Hashable { let name: String; let url: URL }
+
+    /// Common code editors detected via LaunchServices (by bundle id). Only computed when the
+    /// "Open in…" menu is opened (Menu content is lazy), so no per-render cost.
+    private var detectedEditors: [EditorApp] {
+        let known: [(name: String, bundleId: String)] = [
+            ("Sublime Text", "com.sublimetext.4"),
+            ("Sublime Text", "com.sublimetext.3"),
+            ("Visual Studio Code", "com.microsoft.VSCode"),
+            ("Cursor", "com.todesktop.230313mzl4w4u92"),
+            ("Zed", "dev.zed.Zed"),
+            ("Nova", "com.panic.Nova"),
+            ("BBEdit", "com.barebones.bbedit"),
+            ("TextMate", "com.macromates.TextMate"),
+        ]
+        var out: [EditorApp] = []
+        var seenNames = Set<String>()
+        for e in known where !seenNames.contains(e.name) {
+            if let u = NSWorkspace.shared.urlForApplication(withBundleIdentifier: e.bundleId) {
+                out.append(EditorApp(name: e.name, url: u)); seenNames.insert(e.name)
+            }
+        }
+        return out
+    }
+
+    /// Opens brief.md in a specific editor, or the user's default `.md` handler when `appURL` is nil.
+    private func openBriefFile(with appURL: URL?) {
+        guard let room = selectedRoom else { return }
+        ensureBriefFile()
+        let url = room.briefFileURL
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? "".write(to: url, atomically: true, encoding: .utf8)   // create so the editor has a file
+        }
+        if let appURL {
+            NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration())
+        } else {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    // MARK: Refinement loop (étape 2 — converge to a stable brief)
+
+    /// Kicks off a multi-pass refinement. Each pass critiques the current brief (open questions,
+    /// gaps, untestable criteria), resolves them by stating reasonable assumptions, and rewrites —
+    /// converging on its own. The user can Stop, or run it again afterwards.
+    private func startRefinement() {
+        guard selectedRoom != nil, !liveRunning, !refining else { return }
+        refining = true
+        refineStop = false
+        refineConverged = false
+        refinePass = 0
+        refinePrevBrief = (embedded ? briefFileContent : briefEditing).trimmingCharacters(in: .whitespacesAndNewlines)
+        sendRefinePass()
+    }
+
+    private func requestStopRefining() { refineStop = true }
+
+    private func resetRefineState() {
+        refining = false
+        refineStop = false
+        refineConverged = false
+        refinePass = 0
+        refineStatus = ""
+        refinePrevBrief = ""
+    }
+
+    private func sendRefinePass() {
+        guard let room = selectedRoom else { finishRefining(note: ""); return }
+        refinePass += 1
+        refineStatus = "Refining · pass \(refinePass)/\(maxRefinePasses)…"
         let pins = room.contextPaths
-        let prompt = """
-        Output ONLY the current consolidated implementation brief as clean markdown — no preamble, no fences. Sections:
-        ## Goal
-        ## Context
-        ## Constraints
-        ## Acceptance criteria (this project uses strict TDD — acceptance MUST require writing tests first and them passing)
-        """
         chatSpawner.send(room: room,
-                         message: prompt,
+                         message: refinePrompt(current: embedded ? briefFileContent : briefEditing),
                          store: store,
                          allowWeb: false,
+                         allowFileEdit: embedded,
                          contextPath: pins.first,
                          extraDirs: Array(pins.dropFirst()))
+    }
+
+    /// Called when a refine pass completes: load the rewritten brief, judge convergence, then loop
+    /// (next pass) or stop (stable / cap / user stop).
+    private func handleRefinePassFinished() {
+        guard let last = liveTurn?.messages.last, last.role == .assistant else {
+            finishRefining(note: "Refinement stopped — no reply.")
+            return
+        }
+        let (parsed, signal) = RefineSignal.parse(last.text)
+        // Embedded: brief.md is the source of truth (already reloaded this turn); the chat reply
+        // carries only the convergence trailer. Standalone: the reply carries the rewritten brief.
+        let brief: String
+        if embedded {
+            brief = briefFileContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            if !parsed.isEmpty { briefEditing = parsed; persistBrief() }
+            brief = parsed.isEmpty ? briefEditing.trimmingCharacters(in: .whitespacesAndNewlines) : parsed
+        }
+        let similarity = RefineSignal.similarity(refinePrevBrief, brief)
+        let noOpenQuestions = signal.openQuestions.isEmpty
+        let noMaterialChange = !signal.materiallyChanged || similarity >= 0.92
+        let stable = signal.stable || (noOpenQuestions && noMaterialChange)
+
+        if refineStop {
+            finishRefining(note: "Stopped at pass \(refinePass).")
+        } else if stable {
+            refineConverged = true
+            finishRefining(note: "Stable after \(refinePass) pass\(refinePass == 1 ? "" : "es").")
+        } else if refinePass >= maxRefinePasses {
+            let open = noOpenQuestions ? "" : " · \(signal.openQuestions.count) open question\(signal.openQuestions.count == 1 ? "" : "s") left"
+            finishRefining(note: "Reached the \(maxRefinePasses)-pass cap\(open).")
+        } else {
+            refinePrevBrief = brief
+            sendRefinePass()
+        }
+    }
+
+    private func finishRefining(note: String) {
+        refining = false
+        refineStatus = note
+    }
+
+    /// One refinement pass: critique → resolve-by-assumption → rewrite, then a machine trailer that
+    /// drives convergence. The current (possibly hand-edited) brief is fed back in so manual edits
+    /// are respected.
+    private func refinePrompt(current: String) -> String {
+        if embedded { return embeddedRefinePrompt() }
+        let cur = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        let coverage = profile.build.coverageTarget.map { " and a coverage AIM of ≥ \($0)%" } ?? ""
+        let currentBlock = cur.isEmpty
+            ? "There is no distilled brief yet — produce the first consolidated version from the original request and everything discussed above."
+            : "Current distilled brief to critique and improve:\n\"\"\"\n\(cur)\n\"\"\""
+        return """
+        Refinement pass. Re-ground on the ORIGINAL request and ALL context above, then improve the brief.
+
+        \(currentBlock)
+
+        Do, in order:
+        1. CRITIQUE: find the open questions, gaps, ambiguities, and any acceptance criteria that aren't objectively testable.
+        2. RESOLVE: answer each by making the most reasonable assumption given the original request and the pinned context — and STATE those assumptions explicitly in Context/Constraints. Keep an item as an OPEN QUESTION only if it genuinely needs the human and would change the implementation.
+        3. REWRITE the single consolidated brief as clean markdown (no fences) with these sections, dropping none:
+        ## Goal — one sentence outcome.
+        ## Context — self-contained background + the assumptions you made this pass.
+        ## Constraints — hard requirements, non-goals, what not to touch.
+        ## Acceptance criteria — objectively TESTABLE bullets. Strict TDD: each must be verifiable by a test written first that then passes\(coverage).
+        ## Open questions — genuinely-blocking questions for the human, or "None".
+
+        Then, on a NEW LINE after the brief, output EXACTLY this trailer (no fences, nothing after it):
+        \(RefineSignal.sentinel)
+        {"open_questions": ["..."], "materially_changed": true|false, "stable": true|false}
+        materially_changed = did this rewrite change the brief in a way that matters vs the version above; stable = no open questions remain AND another pass would not materially change it.
+        """
     }
 
     private func sendToKanban() {
@@ -396,15 +675,50 @@ struct PreparePromptView: View {
         onSendToFillKanban(final, [], inspect)
     }
 
+    /// Embedded (feature flow): the brief lives in `brief.md`, which Claude reads + edits every turn.
+    private func embeddedRefinePrompt() -> String {
+        let coverage = profile.build.coverageTarget.map { " and a coverage AIM of ≥ \($0)%" } ?? ""
+        return """
+        Refinement pass on `brief.md` (in your working directory). Re-ground on the original request and ALL context above.
+        1. CRITIQUE brief.md: open questions, gaps, ambiguities, and any acceptance criteria that aren't objectively testable.
+        2. RESOLVE by making the most reasonable assumption given the context — STATE those assumptions in Context/Constraints. Keep an item under ## Open questions only if it genuinely needs the human.
+        3. REWRITE `brief.md` accordingly, keeping the sections: ## Goal, ## Context, ## Constraints, ## Acceptance criteria (objectively TESTABLE — strict TDD, tests first that then pass\(coverage)), ## Open questions.
+        Then reply IN CHAT with ONLY this trailer (no brief text, nothing else):
+        \(RefineSignal.sentinel)
+        {"open_questions": ["..."], "materially_changed": true|false, "stable": true|false}
+        materially_changed = did this rewrite change brief.md in a way that matters; stable = no open questions remain AND another pass wouldn't materially change it.
+        """
+    }
+
     private func framingPreamble(_ room: ChatRoom) -> String {
+        if embedded { return embeddedFramingPreamble(room) }
+        let coverageClause = profile.build.coverageTarget.map { ", aiming for ≥ \($0)% test coverage" } ?? ""
         var lines = [
             "You are co-authoring a precise implementation brief for a feature in this project, to be handed to a task decomposer.",
             "Interrogate me and the provided context. Ask clarifying questions. Maintain a single distilled brief covering: goal, context, constraints, and TESTABLE acceptance criteria.",
-            "This project uses strict TDD — acceptance criteria must require writing tests first and them passing. When I say \"distill\", output ONLY the consolidated brief as clean markdown."
+            "This project uses strict TDD — acceptance criteria must require writing tests first and them passing\(coverageClause). I will iteratively REFINE this brief over several passes until it stabilises: on each refine pass you critique the current brief, resolve ambiguities by stating reasonable assumptions, and rewrite it as clean markdown."
         ]
         if let hint = profile.build.testScaffoldingHint { lines.append("Test conventions: \(hint)") }
         if !room.contextPaths.isEmpty {
             lines.append("You have read access to these pinned folders: " + room.contextPaths.joined(separator: ", ") + ".")
+        }
+        if !room.contextLinks.isEmpty {
+            lines.append("Fetch and incorporate these links:\n" + room.contextLinks.map { "- \($0)" }.joined(separator: "\n"))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Feature-flow framing: the brief is the FILE `brief.md`, maintained live by Claude — no copy-paste.
+    private func embeddedFramingPreamble(_ room: ChatRoom) -> String {
+        let coverageClause = profile.build.coverageTarget.map { ", aiming for ≥ \($0)% test coverage" } ?? ""
+        var lines = [
+            "We are co-authoring the implementation brief for a feature. The brief lives in the file `brief.md` in your current working directory — it is the single source of truth (create it if it doesn't exist yet).",
+            "On EVERY message from me: (1) read `brief.md`, (2) update it to reflect our evolving understanding, then (3) reply briefly IN CHAT with just what you changed and any open questions — do NOT paste the brief in chat.",
+            "Keep `brief.md` structured with: ## Goal, ## Context, ## Constraints, ## Acceptance criteria, ## Open questions. Acceptance criteria must be objectively TESTABLE — strict TDD, tests written first that then pass\(coverageClause). Resolve ambiguities by making reasonable assumptions and stating them in Context/Constraints; keep only genuinely-blocking items under Open questions."
+        ]
+        if let hint = profile.build.testScaffoldingHint { lines.append("Test conventions: \(hint)") }
+        if !room.contextPaths.isEmpty {
+            lines.append("You also have read access to these pinned folders (inspect them as needed): " + room.contextPaths.joined(separator: ", ") + ".")
         }
         if !room.contextLinks.isEmpty {
             lines.append("Fetch and incorporate these links:\n" + room.contextLinks.map { "- \($0)" }.joined(separator: "\n"))
@@ -464,6 +778,8 @@ struct PreparePromptView: View {
     }
 
     private func persistBrief() {
+        // Embedded: the brief lives in brief.md (edited by Claude), not in briefText — nothing to save.
+        guard !embedded else { return }
         guard var room = selectedRoom, room.briefText != briefEditing else { return }
         room.briefText = briefEditing
         saveRoom(room)
@@ -471,5 +787,62 @@ struct PreparePromptView: View {
 
     private func saveRoom(_ room: ChatRoom) {
         Task { try? await store.updateChatRoom(room) }
+    }
+}
+
+/// The standalone sheet fixes a roomy frame; embedded in the feature flow the view should size to
+/// its container instead. Applies the sheet frame only when NOT embedded.
+private struct EmbeddableFrame: ViewModifier {
+    let embedded: Bool
+    func body(content: Content) -> some View {
+        if embedded {
+            content
+        } else {
+            content.frame(minWidth: 860, idealWidth: 1000, maxWidth: 1300,
+                          minHeight: 580, idealHeight: 740, maxHeight: 1000)
+        }
+    }
+}
+
+/// Parses a refinement pass reply into the consolidated brief (everything before the trailer) and
+/// the machine convergence signal the model appends. Tolerant by design: a missing or garbled
+/// trailer yields a "not stable" signal so the loop keeps going (bounded by the pass cap) rather
+/// than declaring a false convergence.
+private struct RefineSignal {
+    var openQuestions: [String] = []
+    var materiallyChanged: Bool = true
+    var stable: Bool = false
+
+    static let sentinel = "<<<ATELIER-CONVERGENCE>>>"
+
+    static func parse(_ raw: String) -> (brief: String, signal: RefineSignal) {
+        guard let range = raw.range(of: sentinel) else {
+            return (raw.trimmingCharacters(in: .whitespacesAndNewlines), RefineSignal())
+        }
+        let brief = String(raw[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let after = String(raw[range.upperBound...])
+        var signal = RefineSignal()
+        if let lo = after.firstIndex(of: "{"), let hi = after.lastIndex(of: "}"), lo < hi,
+           let data = String(after[lo...hi]).data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            signal.openQuestions = ((obj["open_questions"] as? [Any]) ?? [])
+                .compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && $0.lowercased() != "none" }
+            signal.materiallyChanged = (obj["materially_changed"] as? Bool) ?? true
+            signal.stable = (obj["stable"] as? Bool) ?? false
+        }
+        return (brief, signal)
+    }
+
+    /// Jaccard similarity over trimmed, non-empty lines — a cheap, objective "did the brief barely
+    /// change?" backstop, independent of the model's own `materially_changed` self-report.
+    static func similarity(_ a: String, _ b: String) -> Double {
+        func lineSet(_ s: String) -> Set<String> {
+            Set(s.lowercased().split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+        }
+        let sa = lineSet(a), sb = lineSet(b)
+        if sa.isEmpty && sb.isEmpty { return 1 }
+        let union = sa.union(sb).count
+        return union == 0 ? 1 : Double(sa.intersection(sb).count) / Double(union)
     }
 }
