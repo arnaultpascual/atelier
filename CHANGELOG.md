@@ -4,6 +4,45 @@ All notable changes to Atelier are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha.5] — 2026-07-01
+
+Two headline features: a **.NET (C#) mode**, and a **feature-centric guided flow** that walks a
+feature from prerequisites → brief → tasks → build → finish — turning the existing bricks (Prepare
+prompt, Fill kanban, autopilot, TDD gate, review, merge, recette, coverage) into one coherent pipeline.
+
+### Added
+
+- **.NET (C#) mode** — detected via `*.sln` / `*.csproj` / `*.fsproj` / `global.json` /
+  `Directory.Build.props`. Gates on `dotnet test`, requires an SDK ≥ 8 (prefers 10), and measures
+  coverage best-effort via `XPlat Code Coverage` (Cobertura line-rate).
+- **Feature = a first-class entity** — a project is now a **list of features**, each walked through a
+  guided **5-stage stepper**: Prerequisites → Brief → Tasks → Build → Finish. Each step gates the next
+  and reuses the existing components; a **Classic kanban** escape hatch keeps the project-level board.
+- **Toolchain preflight on add** — adding a project checks the detected/chosen mode's toolchain and
+  shows a non-blocking "you're missing X — is that expected?" callout.
+- **Living brief file** — the brief is a real `brief.md` that Claude reads and edits **live** as you
+  chat (no copy-paste). A collapsible rendered preview, plus **Open in…** (Sublime Text / VS Code /
+  Zed / Cursor / …) and Reveal in Finder. The multi-pass refinement converges the file to stability.
+- **Feature-scoped tasks, kanban & autopilot** — decompose a feature's brief into its own tasks
+  (`feature_id` frontmatter), edit them inline, then run an autopilot **scoped to that feature** — its
+  own integration branch, live per-task phases, one run per project working tree.
+- **Automatic final synthesis** — once every task is merged, a final pass re-tests + measures coverage
+  on the integration branch (with a fix loop), checks conformity to the brief, and writes a
+  `FEATURE-<slug>.md` deliverable (technical rollup · quality/coverage · manual-test checklist) at the
+  project root, surfaced in the flow's Finish stage with a "Merge & finish".
+- **Opt-in app build** — verify the app build before **each** merge and/or as a **final** pass once
+  everything is merged (each with a bounded fix loop), independently toggleable. Unit tests stay the
+  only merge gate (build stays independent).
+- **Soft coverage target (≥ 90%)** — woven into the brief, decomposition and worker prompts; being
+  below target only proposes a tests-first round, never blocks a merge.
+
+### Fixed
+
+- Task ids are allocated **inside the write transaction over the global id space**, so batch
+  decomposition — especially into a fresh project — no longer collides on `task.id` (SQLite UNIQUE).
+- The autopilot and manual worker handle a **repository with no commits** (unborn HEAD, e.g. a brand-new
+  project) by creating an initial commit so worktrees and branches can be cut.
+
 ## [1.0.0-alpha.4] — 2026-06-29
 
 A development-flow overhaul: project **modes**, a **Prepare prompt** workspace, an enforced
