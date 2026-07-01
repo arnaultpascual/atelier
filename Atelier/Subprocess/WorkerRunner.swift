@@ -57,6 +57,9 @@ actor WorkerRunner {
         /// the chat's `--disallowed-tools` list (web search / file reads).
         var chatAllowWeb: Bool = false
         var chatAllowFiles: Bool = false
+        /// Chat may READ + WRITE + EDIT files in its cwd (the Atelier scratch dir) — used by the
+        /// feature flow's living brief, where Claude maintains `brief.md` as the conversation evolves.
+        var chatAllowFileEdit: Bool = false
         /// When non-nil, the prompt is sent as a stream-json user event on stdin
         /// (with `--input-format stream-json`) instead of as an argv positional —
         /// required to pass image content blocks. stdin is kept open until the
@@ -150,7 +153,10 @@ actor WorkerRunner {
                 "Write", "Edit", "NotebookEdit", "Bash",
                 "TodoWrite", "Agent", "ToolSearch"
             ]
-            if !invocation.chatAllowFiles { disallowed += ["Read", "Glob", "Grep"] }
+            // Living brief: re-enable Read/Write/Edit so Claude can maintain brief.md in its cwd.
+            if invocation.chatAllowFileEdit { disallowed.removeAll { $0 == "Write" || $0 == "Edit" } }
+            let allowFiles = invocation.chatAllowFiles || invocation.chatAllowFileEdit
+            if !allowFiles { disallowed += ["Read", "Glob", "Grep"] }
             if !invocation.chatAllowWeb { disallowed += ["WebFetch", "WebSearch"] }
             arguments.append("--disallowed-tools")
             arguments.append(contentsOf: disallowed)

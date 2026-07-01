@@ -211,7 +211,8 @@ struct FeatureFlowView: View {
 
     private var briefReady: Bool {
         guard let roomId = live.briefRoomId, let room = store.chatRoom(id: roomId) else { return false }
-        return !(room.briefText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let content = (try? String(contentsOf: room.briefFileURL, encoding: .utf8)) ?? ""
+        return !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     // ③ Tasks — wired: decompose the feature's brief into its own tasks, editable inline.
@@ -627,8 +628,10 @@ struct FeatureFlowView: View {
     /// Decompose the feature's (refined) brief into tasks, each stamped with this feature's id.
     /// Additive — a re-decompose appends more tasks to the list.
     private func decomposeIntoFeature() {
-        guard let roomId = live.briefRoomId, let room = store.chatRoom(id: roomId),
-              let brief = room.briefText?.trimmingCharacters(in: .whitespacesAndNewlines), !brief.isEmpty else { return }
+        guard let roomId = live.briefRoomId, let room = store.chatRoom(id: roomId) else { return }
+        let brief = ((try? String(contentsOf: room.briefFileURL, encoding: .utf8)) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !brief.isEmpty else { return }
         decomposing = true
         decomposeError = nil
         let profileSnapshot = profile

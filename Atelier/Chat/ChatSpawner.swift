@@ -35,6 +35,7 @@ final class ChatSpawner {
               store: AppStore,
               attachments: [URL] = [],
               allowWeb: Bool = false,
+              allowFileEdit: Bool = false,
               contextPath: String? = nil,
               extraDirs: [String] = []) {
         guard !isBusy(roomId: room.id) else { return }
@@ -58,6 +59,7 @@ final class ChatSpawner {
                                store: store,
                                attachments: attachments,
                                allowWeb: allowWeb,
+                               allowFileEdit: allowFileEdit,
                                contextPath: contextPath,
                                extraDirs: extraDirs)
         }
@@ -69,6 +71,7 @@ final class ChatSpawner {
                          store: AppStore,
                          attachments: [URL] = [],
                          allowWeb: Bool = false,
+                         allowFileEdit: Bool = false,
                          contextPath: String? = nil,
                          extraDirs: [String] = []) async {
         // Ensure the scratch dir exists (user may have nuked it).
@@ -107,7 +110,7 @@ final class ChatSpawner {
         if let contextPath { dirs.append(contextPath) }
         for d in extraDirs where !dirs.contains(d) { dirs.append(d) }
         let allowFiles = !dirs.isEmpty
-        let toolsOn = allowWeb || allowFiles
+        let toolsOn = allowWeb || allowFiles || allowFileEdit
         let agentId = UUID()
         let runner = WorkerRunner()
         let invocation = WorkerRunner.Invocation(
@@ -123,6 +126,7 @@ final class ChatSpawner {
             resumeSessionId: room.sessionId,
             chatAllowWeb: allowWeb,
             chatAllowFiles: allowFiles,
+            chatAllowFileEdit: allowFileEdit,
             inputStreamJSON: imageEvent
         )
 
