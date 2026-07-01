@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+import AppKit
 import SwiftUI
 
 /// Guided, stage-by-stage flow for one feature. The stepper header shows the five stages; the body
@@ -25,6 +26,12 @@ struct FeatureFlowView: View {
     @State private var decomposeError: String?
     @State private var inspectRepo = true
     @State private var quickAddTitle = ""
+    // ⑤ Finish
+    @State private var deliverableMarkdown: String?
+    @State private var finalizing = false
+    @State private var mergeError: String?
+
+    private static let protectedBranches: Set<String> = ["main", "master", "develop", "development", "trunk", "release"]
 
     init(store: AppStore, spawner: TaskSpawner, server: ApprovalServer, approvalQueue: ApprovalQueue,
          featureRunner: FeatureBuildRunner, chatSpawner: ChatSpawner, project: Project, feature: Feature,
@@ -62,6 +69,14 @@ struct FeatureFlowView: View {
             await loadToolchainIfNeeded()
             await ensureBriefRoomIfNeeded()
         }
+        .task(id: deliverableLoadKey) { loadDeliverable() }
+    }
+
+    /// Reload the deliverable when we enter Finish or when the synthesis writes/updates its path.
+    private var deliverableLoadKey: String { "\(viewedStage.rawValue)|\(live.deliverablePath ?? "")" }
+    private func loadDeliverable() {
+        guard viewedStage == .finish, let path = live.deliverablePath else { deliverableMarkdown = nil; return }
+        deliverableMarkdown = try? String(contentsOfFile: path, encoding: .utf8)
     }
 
     // MARK: Header + stepper
@@ -138,7 +153,7 @@ struct FeatureFlowView: View {
         case .brief: briefStage
         case .tasks: tasksStage
         case .building: buildStage
-        case .finish: placeholder(viewedStage)
+        case .finish: finishStage
         }
     }
 
@@ -447,36 +462,80 @@ struct FeatureFlowView: View {
                             store: store, spawner: spawner, server: server, approvalQueue: approvalQueue)
     }
 
-    // ⑤ — placeholder until the finish phase wires the deliverable surface.
-    private func placeholder(_ s: Feature.Stage) -> some View {
+    // ⑤ Finish — wired: surface the auto-generated deliverable + finalize (merge + complete).
+    private var finishStage: some View {
         VStack(alignment: .leading, spacing: 16) {
-            stageHeading(s)
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Image(systemName: "hammer.fill").foregroundStyle(Color.atelierAccent)
-                    Text("Wired in an upcoming phase").font(AtelierFont.subtitle).foregroundStyle(Color.atelierInk)
+            stageHeading(.finish)
+            if let md = deliverableMarkdown {
+                deliverablePanel(md)
+            } else if live.deliverablePath != nil {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading the deliverable…").font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
                 }
-                Text(placeholderDetail(s))
-                    .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("For now, use “Classic kanban” from the feature list to build with the existing flow.")
-                    .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+            } else {
+                CalloutBanner(.info, "The deliverable (FEATURE-<slug>.md at the project root) is generated automatically when the autopilot finishes. Complete the Build stage first.")
             }
-            .padding(16).frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.atelierSurface.opacity(0.5), in: RoundedRectangle(cornerRadius: AtelierCorner.card))
-            .overlay(RoundedRectangle(cornerRadius: AtelierCorner.card).stroke(Color.atelierDivider, lineWidth: 1))
-            advanceBar(primaryTitle: "Continue")
+            finalizePanel
         }
     }
 
-    private func placeholderDetail(_ s: Feature.Stage) -> String {
-        switch s {
-        case .brief: return "This stage will host brief co-authoring + multi-pass refinement (the existing Prepare-Prompt flow), scoped to this feature, until the brief stabilises."
-        case .tasks: return "This stage will host decomposition into a task list you can edit and iterate on per task (the existing Fill-Kanban flow), feeding this feature's backlog."
-        case .building: return "This stage will host this feature's kanban + the autopilot run (dev → test gate → review → merge), scoped to the feature's tasks."
-        case .finish: return "This stage will host the automatic final synthesis: re-test, coverage, conformity to the brief, and the FEATURE-<slug>.md deliverable at the project root."
-        case .prerequisites: return s.summary
+    private func deliverablePanel(_ md: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("DELIVERABLE").font(AtelierFont.eyebrow.weight(.semibold)).foregroundStyle(Color.atelierInk)
+                Spacer()
+                if let path = live.deliverablePath {
+                    Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }.controlSize(.small)
+                    Button("Copy") {
+                        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(md, forType: .string)
+                    }.controlSize(.small)
+                }
+            }
+            ScrollView {
+                MarkdownView(source: md).frame(maxWidth: .infinity, alignment: .leading).padding(12)
+            }
+            .frame(height: 380)
+            .background(Color.atelierBackground, in: RoundedRectangle(cornerRadius: AtelierCorner.card))
+            .overlay(RoundedRectangle(cornerRadius: AtelierCorner.card).stroke(Color.atelierDivider, lineWidth: 1))
+            if let path = live.deliverablePath {
+                Text((path as NSString).abbreviatingWithTildeInPath)
+                    .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
         }
+    }
+
+    private var finalizePanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if live.isCompleted {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.seal.fill").foregroundStyle(Palette.success)
+                    Text("Feature completed\(live.completedAt.map { " · \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "").")
+                        .font(AtelierFont.caption).foregroundStyle(Color.atelierInk)
+                }
+            } else {
+                if let branch = live.integrationBranch, !branch.isEmpty {
+                    Text("Integration branch: \(branch)").font(AtelierFont.captionMono).foregroundStyle(Color.atelierInkSecondary)
+                        .lineLimit(1).truncationMode(.middle)
+                    HStack(spacing: 10) {
+                        Button(action: mergeAndFinish) {
+                            HStack(spacing: 6) {
+                                if finalizing { ProgressView().controlSize(.small) }
+                                Text("Merge & finish").fontWeight(.semibold)
+                                Image(systemName: "arrow.triangle.merge")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent).disabled(finalizing)
+                        Button("Mark done without merging") { markDoneOnly() }.controlSize(.small).disabled(finalizing)
+                    }
+                } else {
+                    Button("Mark feature done") { markDoneOnly() }.buttonStyle(.borderedProminent).disabled(finalizing)
+                }
+                if let err = mergeError { CalloutBanner(.danger, err) }
+            }
+        }
+        .padding(.top, 4)
     }
 
     // MARK: Advance / navigate
@@ -585,6 +644,54 @@ struct FeatureFlowView: View {
 
     private func deleteTask(_ t: AtelierTask) {
         Task { try? await store.deleteTask(t) }
+    }
+
+    // MARK: ⑤ Finish actions
+
+    private func markDoneOnly() {
+        finalizing = true
+        Task {
+            var f = store.featureByID(feature.id) ?? feature
+            f.completedAt = Date()
+            try? await store.updateFeature(f)
+            await MainActor.run { finalizing = false }
+        }
+    }
+
+    /// Merge the feature's integration branch into the currently checked-out branch (guarding
+    /// protected branches, aborting cleanly on conflict), then mark the feature completed.
+    private func mergeAndFinish() {
+        guard let branch = live.integrationBranch, !branch.isEmpty else { return }
+        finalizing = true; mergeError = nil
+        let projectPath = project.path
+        Task {
+            do {
+                let base = try await GitService.currentBranch(projectPath: projectPath)
+                if Self.protectedBranches.contains(base.lowercased()) {
+                    await MainActor.run {
+                        finalizing = false
+                        mergeError = "You're on protected branch “\(base)”. Check out your integration/feature branch, or merge \(branch) by hand."
+                    }
+                    return
+                }
+                let result = try await GitService.merge(into: base, branch: branch, projectPath: projectPath)
+                switch result {
+                case .clean, .upToDate:
+                    var f = store.featureByID(feature.id) ?? feature
+                    f.completedAt = Date()
+                    try? await store.updateFeature(f)
+                    await MainActor.run { finalizing = false }
+                case .conflict(let files):
+                    try? await GitService.abortMerge(projectPath: projectPath)
+                    await MainActor.run {
+                        finalizing = false
+                        mergeError = "Merge conflicts in \(files.count) file(s). Aborted — merge \(branch) into \(base) by hand."
+                    }
+                }
+            } catch {
+                await MainActor.run { finalizing = false; mergeError = error.localizedDescription }
+            }
+        }
     }
 
     private func advance(to next: Feature.Stage) {
