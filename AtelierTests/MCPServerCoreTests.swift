@@ -141,4 +141,21 @@ final class MCPServerCoreTests: XCTestCase {
         let r = await core().handle(req(12, "does/not/exist"), bridge: alwaysOK())
         XCTAssertEqual(r?.error?.code, -32601)
     }
+
+    func testReportProgressHugePctIsToolErrorNotCrash() async {
+        let bridge = alwaysOK()
+        let params: JSONValue = .object(["name": .string("task_report_progress"),
+                                         "arguments": .object(["pct": .double(1e30), "taskId": .string("T1")])])
+        let r = await core().handle(req(13, "tools/call", params), bridge: bridge)
+        XCTAssertEqual(r?.result?["isError"]?.boolValue, true)   // rejected, not crashed
+        let count = await bridge.count
+        XCTAssertEqual(count, 0)                                 // never reached the bridge
+    }
+
+    func testInitializeRejectsUnsupportedProtocolAndAdvertisesPrompts() async {
+        let params: JSONValue = .object(["protocolVersion": .string("1999-01-01")])
+        let r = await core().handle(req(14, "initialize", params), bridge: alwaysOK())
+        XCTAssertEqual(r?.result?["protocolVersion"]?.stringValue, MCPServerCore.defaultProtocolVersion)
+        XCTAssertNotNil(r?.result?["capabilities"]?["prompts"])
+    }
 }

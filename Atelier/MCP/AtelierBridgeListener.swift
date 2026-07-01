@@ -144,15 +144,19 @@ actor AtelierBridgeListener {
             return .success(id: req.id, result: nil)
 
         case "resource_read":
-            let uri = req.args["uri"]?.stringValue ?? ""
-            let outcome = await MainActor.run {
-                Self.readLivingBrief(store: store, featureId: featureId, uri: uri)
+            // Resolve the living-brief URL on @MainActor (store access only), then
+            // read the file OFF the main actor (no blocking I/O on MainActor).
+            let (featureFound, url): (Bool, URL?) = await MainActor.run {
+                guard let feature = store.featureByID(featureId) else { return (false, nil) }
+                return (true, feature.briefRoomId.flatMap { store.chatRoom(id: $0) }?.briefFileURL)
             }
-            switch outcome {
-            case .ok(let text):
-                return .success(id: req.id, result: .object(["text": .string(text), "mimeType": .string("text/markdown")]))
-            case .fail(let err):
+            switch Self.briefResolution(featureFound: featureFound, briefURL: url) {
+            case .notFound(let err):
                 return .failure(id: req.id, error: err)
+            case .empty:
+                return .success(id: req.id, result: Self.markdownResource(""))
+            case .url(let fileURL):
+                return .success(id: req.id, result: Self.markdownResource(Self.readBriefFile(fileURL)))
             }
 
         default:
@@ -160,21 +164,23 @@ actor AtelierBridgeListener {
         }
     }
 
-    enum ResourceOutcome: Sendable { case ok(String); case fail(String) }
+    /// Pure decision for a living-brief resource read (unit-tested):
+    /// - feature absent → error; feature present but no brief room yet → empty
+    ///   (brief stage not entered); otherwise read the resolved URL.
+    enum BriefResolution: Equatable, Sendable { case url(URL); case empty; case notFound(String) }
 
-    /// Resolves the scoped feature's living brief.md and returns its contents.
-    /// Tolerates a not-yet-created file (returns empty), but errors if the
-    /// feature/room can't be resolved at all.
-    @MainActor
-    private static func readLivingBrief(store: AppStore, featureId: String, uri: String) -> ResourceOutcome {
-        guard let feature = store.featureByID(featureId) else {
-            return .fail("feature \(featureId) not found")
-        }
-        guard let roomId = feature.briefRoomId, let room = store.chatRoom(id: roomId) else {
-            return .ok("")   // brief stage not entered yet → empty living spec
-        }
-        let url = room.briefFileURL
-        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        return .ok(text)
+    static func briefResolution(featureFound: Bool, briefURL: URL?) -> BriefResolution {
+        guard featureFound else { return .notFound("feature not found") }
+        guard let briefURL else { return .empty }   // brief stage not entered yet
+        return .url(briefURL)
+    }
+
+    /// Reads a brief file, tolerating a not-yet-created file (→ empty string).
+    static func readBriefFile(_ url: URL) -> String {
+        (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    }
+
+    static func markdownResource(_ text: String) -> JSONValue {
+        .object(["text": .string(text), "mimeType": .string("text/markdown")])
     }
 }

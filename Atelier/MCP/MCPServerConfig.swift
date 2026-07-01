@@ -38,18 +38,11 @@ enum MCPServerConfig {
                 NSLocalizedDescriptionKey: "AtelierMCPServer binary not found in app bundle. Re-build the project."
             ])
         }
-        var args: [String] = ["--socket", socketPath, "--feature-id", featureId]
-        if let taskId, !taskId.isEmpty { args += ["--task-id", taskId] }
-        args += ["--project-path", projectPath, "--agent-id", agentId.uuidString]
-
-        let payload: [String: Any] = [
-            "mcpServers": [
-                serverName: [
-                    "command": server,
-                    "args": args,
-                ]
-            ]
-        ]
+        let payload = buildConfigPayload(
+            serverName: serverName, command: server, socketPath: socketPath,
+            featureId: featureId, taskId: taskId, projectPath: projectPath,
+            agentId: agentId.uuidString
+        )
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("atelier-mcp-\(agentId.uuidString).json")
         let data = try JSONSerialization.data(
@@ -62,5 +55,22 @@ enum MCPServerConfig {
 
     static func cleanup(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Pure config-payload builder (unit-tested), independent of Bundle.main.
+    /// `--task-id` is omitted when there is no task in scope.
+    static func buildConfigPayload(
+        serverName: String,
+        command: String,
+        socketPath: String,
+        featureId: String,
+        taskId: String?,
+        projectPath: String,
+        agentId: String
+    ) -> [String: Any] {
+        var args: [String] = ["--socket", socketPath, "--feature-id", featureId]
+        if let taskId, !taskId.isEmpty { args += ["--task-id", taskId] }
+        args += ["--project-path", projectPath, "--agent-id", agentId]
+        return ["mcpServers": [serverName: ["command": command, "args": args]]]
     }
 }

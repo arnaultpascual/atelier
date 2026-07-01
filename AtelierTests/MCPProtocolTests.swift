@@ -87,4 +87,38 @@ final class MCPProtocolTests: XCTestCase {
         let obj = try MCPCodec.decoder.decode(JSONValue.self, from: MCPCodec.encodeResponse(resp))
         XCTAssertEqual(obj["id"], .null)
     }
+
+    // MARK: intValue safety (regression: Int(d) trap on bogus pct)
+
+    func testIntValueNeverTrapsOnHugeOrFractionalDouble() {
+        XCTAssertNil(JSONValue.double(1e30).intValue)
+        XCTAssertNil(JSONValue.double(-1e30).intValue)
+        XCTAssertNil(JSONValue.double(2.5).intValue)
+        XCTAssertNil(JSONValue.double(.nan).intValue)
+        XCTAssertNil(JSONValue.double(.infinity).intValue)
+        XCTAssertEqual(JSONValue.double(2.0).intValue, 2)   // whole double still coerces
+    }
+
+    func testHugeNumberDecodesToDoubleAndIntValueIsNil() throws {
+        let v = try MCPCodec.decoder.decode(JSONValue.self, from: Data("1e30".utf8))
+        guard case .double = v else { return XCTFail("expected .double, got \(v)") }
+        XCTAssertNil(v.intValue)   // must not trap
+    }
+
+    // MARK: id edge cases
+
+    func testExplicitNullIdIsNotNotification() {
+        let req = MCPCodec.decodeRequest(Data(#"{"jsonrpc":"2.0","id":null,"method":"tools/list"}"#.utf8))
+        XCTAssertNotNil(req)
+        XCTAssertFalse(req?.isNotification ?? true)   // present-but-null → real request
+        XCTAssertEqual(req?.id, .null)
+    }
+
+    func testFractionalIdRoundTrips() throws {
+        let req = MCPCodec.decodeRequest(Data(#"{"jsonrpc":"2.0","id":1.5,"method":"x"}"#.utf8))
+        XCTAssertEqual(req?.id, .double(1.5))
+        let obj = try MCPCodec.decoder.decode(JSONValue.self,
+                    from: MCPCodec.encodeResponse(.success(id: req?.id, result: .bool(true))))
+        XCTAssertEqual(obj["id"]?.doubleValue, 1.5)
+    }
 }

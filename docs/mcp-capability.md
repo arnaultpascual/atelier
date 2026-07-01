@@ -130,9 +130,9 @@ This keeps guardrail §2.1 ("capability only, never permissions") true: we never
 
 ## 7. Feature-scoping & kill-switch
 
-- **Thread identity:** add `featureId`/`taskId` to `WorkerRunner.Invocation`; populate from `task.featureId` in `TaskSpawner.execute`; pass explicitly for managed/synthesis workers (no task row).
-- **Gate = scope, not API:** attach `--mcp-config` **iff** the spawn is feature-scoped — `AutopilotRun.featureId != nil`, or the call originates from the `FeatureFlowView` brief/decompose path. The shared `TaskSpawner`/`FeatureBuildRunner.start` also serve project-scoped/free-task runs (`PlanBatchView`, `BacklogPane`, `AgentDetailPane`, `SwarmView`) which must **not** get MCP config.
-- **Kill-switch:** one app-level flag (`UserDefaults` / DEBUG), **OFF** through Phases 1–3, **ON** in Phase 4. No per-project toggle.
+- **Gate = task ownership (`task.featureId != nil`).** A spawn gets `--mcp-config` iff its task belongs to a feature — so the worker is handed *that feature's* MCP context, **regardless of which UI launched it** (feature flow, kanban relaunch, save-and-spawn). Free/project tasks (`featureId == nil`) never get MCP. This is simpler and safer than gating on launch site: the MCP surface is scoped to the owning feature, and the first-party `mcp__atelier__*` / `ReadMcpResourceTool` calls are internal capability ops (progress, own-resource reads) with nothing destructive to gate — so auto-accepting them is fine even in a human-watched, non-autopilot session. (Earlier drafts gated on "originates from FeatureFlowView"; that over-specified — a feature task manually relaunched from the kanban should still get its feature's context.)
+- **Phase 1 scope:** wired in `TaskSpawner.execute` (the task-build spawn). The `iterate` and `runManagedWorker` (feature-synthesis) spawns do **not** yet get MCP — added in later phases.
+- **Kill-switch:** one app-level flag (`MCPCapability.isEnabled`, UserDefaults), **OFF** through Phases 1–3, **ON** in Phase 4. No per-project toggle. When OFF, no spawn gets `--mcp-config`.
 
 ---
 

@@ -57,7 +57,10 @@ public enum JSONValue: Codable, Equatable, Sendable {
     public var intValue: Int? {
         switch self {
         case .int(let i): return i
-        case .double(let d) where d.rounded() == d: return Int(d)
+        // `Int(exactly:)` is nil for fractional, out-of-range, NaN and infinite
+        // doubles — never traps. (A bare `Int(d)` trap here would kill the whole
+        // MCP server process on a bogus `pct` like 1e30.)
+        case .double(let d): return Int(exactly: d)
         default: return nil
         }
     }
@@ -82,20 +85,31 @@ public enum JSONValue: Codable, Equatable, Sendable {
 
 // MARK: - JSON-RPC id
 
-/// A JSON-RPC request/response id: string or number (notifications omit it).
+/// A JSON-RPC request/response id: string, number, or (rarely) explicit null.
+/// A truly *absent* id member means a notification — modelled as `nil` on the
+/// request, not as `.null`.
 public enum JSONRPCID: Codable, Equatable, Sendable {
     case string(String)
     case number(Int)
+    case double(Double)   // fractional / bignum ids preserved so correlation survives
+    case null
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.singleValueContainer()
-        if let s = try? c.decode(String.self) { self = .string(s); return }
+        if c.decodeNil() { self = .null; return }
         if let n = try? c.decode(Int.self) { self = .number(n); return }
-        throw DecodingError.dataCorruptedError(in: c, debugDescription: "id must be a string or number")
+        if let d = try? c.decode(Double.self) { self = .double(d); return }
+        if let s = try? c.decode(String.self) { self = .string(s); return }
+        throw DecodingError.dataCorruptedError(in: c, debugDescription: "id must be a string, number, or null")
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.singleValueContainer()
-        switch self { case .string(let s): try c.encode(s); case .number(let n): try c.encode(n) }
+        switch self {
+        case .string(let s): try c.encode(s)
+        case .number(let n): try c.encode(n)
+        case .double(let d): try c.encode(d)
+        case .null: try c.encodeNil()
+        }
     }
 }
 
@@ -117,7 +131,9 @@ extension JSONRPCRequest: Decodable {
     enum CodingKeys: String, CodingKey { case id, method, params }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try c.decodeIfPresent(JSONRPCID.self, forKey: .id)
+        // Distinguish an ABSENT id (notification) from a present-but-null id (a
+        // real request that must get a response with `"id": null`).
+        self.id = c.contains(.id) ? try c.decode(JSONRPCID.self, forKey: .id) : nil
         self.method = try c.decode(String.self, forKey: .method)
         self.params = try c.decodeIfPresent(JSONValue.self, forKey: .params)
     }

@@ -37,6 +37,7 @@ public struct MCPContext: Sendable, Equatable {
 public struct MCPServerCore: Sendable {
     public let context: MCPContext
     public static let defaultProtocolVersion = "2025-06-18"
+    public static let supportedProtocolVersions: Set<String> = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
     public init(context: MCPContext) {
         self.context = context
@@ -116,12 +117,16 @@ public struct MCPServerCore: Sendable {
     }
 
     private func initializeResult(params: JSONValue?) -> JSONValue {
-        let proto = params?["protocolVersion"]?.stringValue ?? Self.defaultProtocolVersion
+        // Negotiate: honour the client's requested version only if we support it,
+        // otherwise fall back to our default (don't blindly echo an unknown one).
+        let requested = params?["protocolVersion"]?.stringValue
+        let proto = (requested.map(Self.supportedProtocolVersions.contains) ?? false) ? requested! : Self.defaultProtocolVersion
         return .object([
             "protocolVersion": .string(proto),
             "capabilities": .object([
                 "tools": .object([:]),
                 "resources": .object([:]),
+                "prompts": .object([:]),   // prompts/list answered (empty until Phase 4)
             ]),
             "serverInfo": .object([
                 "name": .string(context.serverName),
