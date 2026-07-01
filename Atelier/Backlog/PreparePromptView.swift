@@ -382,8 +382,23 @@ struct PreparePromptView: View {
                     .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
                     .lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 4)
-                Button { revealBriefFile() } label: { Image(systemName: "arrow.up.forward.square").font(.system(size: 10)) }
-                    .buttonStyle(.plain).foregroundStyle(Color.atelierInkSecondary).help("Reveal brief.md in Finder")
+                Menu {
+                    Button("Open in default editor") { openBriefFile(with: nil) }
+                    let editors = detectedEditors
+                    if !editors.isEmpty {
+                        Divider()
+                        ForEach(editors, id: \.self) { ed in
+                            Button("Open in \(ed.name)") { openBriefFile(with: ed.url) }
+                        }
+                    }
+                    Divider()
+                    Button("Reveal in Finder") { revealBriefFile() }
+                } label: {
+                    Image(systemName: "square.and.pencil").font(.system(size: 10))
+                }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .foregroundStyle(Color.atelierInkSecondary)
+                .help("Open brief.md in your editor")
                 Button { briefPreviewCollapsed.toggle() } label: {
                     Image(systemName: briefPreviewCollapsed ? "chevron.down" : "chevron.up").font(.system(size: 10))
                 }
@@ -493,6 +508,47 @@ struct PreparePromptView: View {
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } else {
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: room.scratchPath)])
+        }
+    }
+
+    /// A text editor installed on this Mac, offered in the "Open in…" menu.
+    private struct EditorApp: Hashable { let name: String; let url: URL }
+
+    /// Common code editors detected via LaunchServices (by bundle id). Only computed when the
+    /// "Open in…" menu is opened (Menu content is lazy), so no per-render cost.
+    private var detectedEditors: [EditorApp] {
+        let known: [(name: String, bundleId: String)] = [
+            ("Sublime Text", "com.sublimetext.4"),
+            ("Sublime Text", "com.sublimetext.3"),
+            ("Visual Studio Code", "com.microsoft.VSCode"),
+            ("Cursor", "com.todesktop.230313mzl4w4u92"),
+            ("Zed", "dev.zed.Zed"),
+            ("Nova", "com.panic.Nova"),
+            ("BBEdit", "com.barebones.bbedit"),
+            ("TextMate", "com.macromates.TextMate"),
+        ]
+        var out: [EditorApp] = []
+        var seenNames = Set<String>()
+        for e in known where !seenNames.contains(e.name) {
+            if let u = NSWorkspace.shared.urlForApplication(withBundleIdentifier: e.bundleId) {
+                out.append(EditorApp(name: e.name, url: u)); seenNames.insert(e.name)
+            }
+        }
+        return out
+    }
+
+    /// Opens brief.md in a specific editor, or the user's default `.md` handler when `appURL` is nil.
+    private func openBriefFile(with appURL: URL?) {
+        guard let room = selectedRoom else { return }
+        ensureBriefFile()
+        let url = room.briefFileURL
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? "".write(to: url, atomically: true, encoding: .utf8)   // create so the editor has a file
+        }
+        if let appURL {
+            NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration())
+        } else {
+            NSWorkspace.shared.open(url)
         }
     }
 
