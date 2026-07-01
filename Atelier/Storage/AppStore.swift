@@ -363,29 +363,28 @@ final class AppStore {
                     featureId: String? = nil) async throws -> AtelierTask {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         precondition(!trimmed.isEmpty, "Task title must not be empty")
+        let projectId = project.id
+        let model = workerModel ?? project.defaultModel
 
-        let existingIds = tasks(in: project.id).map(\.id)
-        let id = BacklogMD.nextId(existing: existingIds)
-        let filename = BacklogMD.filename(forId: id, title: trimmed)
-        let mdPath = "backlog/tasks/\(filename)"
-        let absolutePath = URL(fileURLWithPath: project.path).appendingPathComponent(mdPath).path
-
-        var mutableDraft = AtelierTask.newDraft(
-            id: id,
-            projectId: project.id,
-            title: trimmed,
-            mdPath: mdPath,
-            priority: priority,
-            workerModel: workerModel ?? project.defaultModel
-        )
-        mutableDraft.featureId = featureId
-        let draft = mutableDraft
-
-        try BacklogMD.write(task: draft, to: absolutePath)
-        try await db.write { db in
-            var copy = draft
-            try copy.insert(db)
+        // Allocate the id AND insert inside a single write transaction, reading the already-committed
+        // ids (not the async observation cache). Rapid/batch creates (e.g. decompose) otherwise all
+        // read a stale cache and collide on task.id (SQLite UNIQUE). GRDB serializes writes, so the
+        // max-id read + insert are atomic against concurrent creates.
+        let draft: AtelierTask = try await db.write { db in
+            // task.id is a GLOBAL primary key (unique across the whole table), so allocate against
+            // ALL task ids — not just this project's. A new/low-numbered project otherwise regenerates
+            // an id (task-001…) that already exists globally → SQLite UNIQUE on task.id.
+            let existing = try String.fetchAll(db, sql: "SELECT id FROM task")
+            let id = BacklogMD.nextId(existing: existing)
+            let mdPath = "backlog/tasks/\(BacklogMD.filename(forId: id, title: trimmed))"
+            var d = AtelierTask.newDraft(id: id, projectId: projectId, title: trimmed,
+                                         mdPath: mdPath, priority: priority, workerModel: model)
+            d.featureId = featureId
+            try d.insert(db)
+            return d
         }
+        // Write the .md file once the row (and its id) is committed.
+        try BacklogMD.write(task: draft, to: draft.absoluteMdPath(projectRoot: project.path))
         return draft
     }
 

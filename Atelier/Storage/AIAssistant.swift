@@ -494,7 +494,7 @@ enum AIAssistant {
                                              maxTurns: turns,
                                              apiKey: apiKey,
                                              repoPath: repoPath,
-                                             timeoutSeconds: repoPath == nil ? 120 : 240,
+                                             timeoutSeconds: repoPath == nil ? 120 : 420,
                                              onActivity: onActivity)
         }
         return try parseTaskDrafts(raw)
