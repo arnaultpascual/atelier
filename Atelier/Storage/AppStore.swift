@@ -264,6 +264,16 @@ final class AppStore {
         }
     }
 
+    /// Transactional read-modify-write of a project (reads the committed row inside the txn) so
+    /// rapid independent field toggles don't clobber each other off the lagging cache.
+    func updateProject(id: String, _ mutate: @escaping @Sendable (inout Project) -> Void) async throws {
+        try await db.write { db in
+            guard var p = try Project.filter(Project.Columns.id == id).fetchOne(db) else { return }
+            mutate(&p)
+            try p.update(db)
+        }
+    }
+
     func projectByID(_ id: String) -> Project? {
         projectsByWorkspace.values.flatMap { $0 }.first(where: { $0.id == id })
     }

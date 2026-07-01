@@ -217,6 +217,14 @@ enum Schema {
             }
         }
 
+        // v12 — opt-in FINAL app build (+ fix loop) on the integration branch, independent of the
+        // per-merge build verification. Default off; never a gate on unit tests.
+        migrator.registerMigration("v12_project_build_verify_final") { db in
+            try db.alter(table: "project") { t in
+                t.add(column: "buildVerifyFinal", .boolean).notNull().defaults(to: false)
+            }
+        }
+
         try migrator.migrate(pool)
     }
 }

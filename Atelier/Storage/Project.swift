@@ -12,9 +12,12 @@ struct Project: Identifiable, Hashable, Codable, Sendable, FetchableRecord, Muta
     var defaultModel: String?       // e.g. "claude-sonnet-4-6"
     var budgetUsdMonthly: Double?
     var autoApproveLevel: AutoApproveLevel?   // local per-project auto-approve policy (DB-only)
-    /// Opt-in: run a build/compile target before merge to verify (+ fix). OFF by default — Atelier
-    /// stays independent of the (often slow / env-bound / remote) app build.
+    /// Opt-in: run the app build before EACH task merge (+ fix loop). OFF by default — Atelier stays
+    /// independent of the (often slow / env-bound / remote) app build.
     var buildVerifyBeforeMerge: Bool = false
+    /// Opt-in: run ONE final app build (+ fix loop / "affinage") on the integration branch once every
+    /// task is merged, during the final synthesis. Independent of `buildVerifyBeforeMerge`. OFF by default.
+    var buildVerifyFinal: Bool = false
     /// Optional fast/local build target for verification; falls back to the mode's buildCommand.
     var verifyBuildCommand: String? = nil
     /// Opt-in: when the final synthesis lands below the mode's coverage aim, run one tests-first
@@ -34,6 +37,7 @@ struct Project: Identifiable, Hashable, Codable, Sendable, FetchableRecord, Muta
         static let budgetUsdMonthly = Column(CodingKeys.budgetUsdMonthly)
         static let autoApproveLevel = Column(CodingKeys.autoApproveLevel)
         static let buildVerifyBeforeMerge = Column(CodingKeys.buildVerifyBeforeMerge)
+        static let buildVerifyFinal = Column(CodingKeys.buildVerifyFinal)
         static let verifyBuildCommand = Column(CodingKeys.verifyBuildCommand)
         static let coverageImprovementRound = Column(CodingKeys.coverageImprovementRound)
         static let createdAt = Column(CodingKeys.createdAt)

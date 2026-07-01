@@ -114,6 +114,7 @@ private struct GeneralTab: View {
     @State private var draftBudget: String = ""
     @State private var draftAutoApprove: AutoApproveLevel = .off
     @State private var draftBuildVerify: Bool = false
+    @State private var draftBuildVerifyFinal: Bool = false
     @State private var draftVerifyCommand: String = ""
     @State private var draftCoverageRound: Bool = false
     @State private var saveError: String?
@@ -275,9 +276,9 @@ private struct GeneralTab: View {
                 }
             }
 
-            field(label: "BUILD VERIFY BEFORE MERGE") {
+            field(label: "BUILD VERIFY BEFORE EACH MERGE") {
                 Toggle(isOn: $draftBuildVerify) {
-                    Text("Run a build target before merge (opt-in)")
+                    Text("Build the app before each task merge (opt-in, + fix)")
                         .font(AtelierFont.caption)
                 }
                 .toggleStyle(.switch)
@@ -293,6 +294,17 @@ private struct GeneralTab: View {
                         .font(AtelierFont.eyebrow)
                         .foregroundStyle(Color.atelierInkSecondary)
                 }
+            }
+
+            field(label: "FINAL APP BUILD (+ FIX)") {
+                Toggle(isOn: $draftBuildVerifyFinal) {
+                    Text("Build once when all tasks are merged (opt-in, + fix pass)")
+                        .font(AtelierFont.caption)
+                }
+                .toggleStyle(.switch)
+                Text("Off by default. During the final synthesis (every task merged), builds the integration branch once and, on failure, iterates a fix worker (\"affinage\") — never a gate on unit tests. Uses the same command as above. Independent of the per-merge build.")
+                    .font(AtelierFont.caption)
+                    .foregroundStyle(Color.atelierInkSecondary)
             }
 
             if let target = modeCoverageTarget {
@@ -417,6 +429,7 @@ private struct GeneralTab: View {
         draftBudget = project.budgetUsdMonthly.map { String(format: "%.2f", $0) } ?? ""
         draftAutoApprove = project.autoApproveLevel ?? .off
         draftBuildVerify = project.buildVerifyBeforeMerge
+        draftBuildVerifyFinal = project.buildVerifyFinal
         draftVerifyCommand = project.verifyBuildCommand ?? ""
         draftCoverageRound = project.coverageImprovementRound
         saveError = nil
@@ -434,6 +447,7 @@ private struct GeneralTab: View {
         updated.budgetUsdMonthly = draftBudget.isEmpty ? nil : parsedBudget
         updated.autoApproveLevel = (draftAutoApprove == .off) ? nil : draftAutoApprove
         updated.buildVerifyBeforeMerge = draftBuildVerify
+        updated.buildVerifyFinal = draftBuildVerifyFinal
         let cmd = draftVerifyCommand.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.verifyBuildCommand = cmd.isEmpty ? nil : cmd
         updated.coverageImprovementRound = draftCoverageRound

@@ -717,10 +717,31 @@ final class FeatureBuildRunner {
             testResult = result
         }
 
-        // (a') optional build-verify (opt-in) on the integration branch.
+        // (a') optional FINAL app build on the integration branch, with a bounded fix loop
+        // ("affinage"). Independent of the per-merge build verification. Never gates on unit tests.
         var buildOutcome: TestRunner.CommandOutcome? = nil
-        if deps.project.buildVerifyBeforeMerge, let cmd = deps.project.resolvedVerifyBuildCommand(profile: profile) {
-            buildOutcome = await TestRunner.runCommand(cmd, worktreePath: deps.project.path, profile: profile, mainRepoPath: deps.project.path)
+        if deps.project.buildVerifyFinal, run.status == .running, !overBudget(run),
+           let cmd = deps.project.resolvedVerifyBuildCommand(profile: profile) {
+            var outcome = await TestRunner.runCommand(cmd, worktreePath: deps.project.path, profile: profile, mainRepoPath: deps.project.path)
+            var pass = 0
+            while let o = outcome, !o.passed, pass < maxFixPasses, run.status == .running, !overBudget(run) {
+                pass += 1
+                let tail = o.stderrTail.isEmpty ? o.stdoutTail : o.stderrTail
+                let fix = await deps.spawner.runManagedWorker(
+                    label: "final-build-fix",
+                    prompt: featureBuildFixPrompt(cmd, String(tail.suffix(1500))),
+                    workingDirectory: deps.project.path,
+                    project: deps.project, model: ModelRouter.latestOpus, apiKey: deps.apiKey,
+                    store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue)
+                run.synthesisCostUsd += fix.costUsd
+                if fix.looksUsageLimited { break }
+                outcome = await TestRunner.runCommand(cmd, worktreePath: deps.project.path, profile: profile, mainRepoPath: deps.project.path)
+            }
+            buildOutcome = outcome
+            // A build fix may have touched code — re-run the unit suite so the deliverable stays honest.
+            if pass > 0, !profile.build.fastTestCommands.isEmpty {
+                testResult = await TestRunner.runFastTests(profile: profile, worktreePath: deps.project.path, mainRepoPath: deps.project.path)
+            }
         }
 
         // Measure final coverage once (string for the deliverable + rate for the soft-round check).
@@ -808,6 +829,17 @@ final class FeatureBuildRunner {
 
         Failure summary:
         \(summary)
+        """
+    }
+
+    private func featureBuildFixPrompt(_ command: String, _ tail: String) -> String {
+        """
+        The whole feature is merged on this branch (the current directory) and its unit tests pass,
+        but the app build fails: `\(command)`. Fix the build so it exits 0 — make the smallest change
+        that resolves it. Do NOT weaken or delete unit tests; they must stay green. Commit when done.
+
+        Build output (tail):
+        \(tail)
         """
     }
 

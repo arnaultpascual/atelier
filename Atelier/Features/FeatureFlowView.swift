@@ -317,10 +317,49 @@ struct FeatureFlowView: View {
         let run = featureRunner.run(forFeature: feature.id)
         return VStack(alignment: .leading, spacing: 16) {
             stageHeading(.building)
+            if run == nil { buildVerifyOptions }   // configure the optional app build before starting
             autopilotBar(run: run, featureTasks: featureTasks)
             featureKanban(featureTasks: featureTasks, run: run)
             // Also open the gate when a deliverable exists — the in-memory run is gone after a relaunch.
             advanceBar(primaryTitle: "Continue to Finish", canAdvance: run?.status == .finished || live.deliverablePath != nil)
+        }
+    }
+
+    /// Opt-in app-build verification (the gate stays unit tests): before each merge and/or a final
+    /// build + fix pass once everything is merged. Persisted on the project; picked up at launch.
+    private var buildVerifyOptions: some View {
+        let cmd = (store.projectByID(project.id) ?? project).resolvedVerifyBuildCommand(profile: profile)
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("APP BUILD — optional (unit tests stay the gate)")
+                .font(AtelierFont.eyebrow.weight(.semibold)).foregroundStyle(Color.atelierInkSecondary)
+            if let cmd {
+                Toggle(isOn: Binding(get: { store.projectByID(project.id)?.buildVerifyBeforeMerge ?? false },
+                                     set: { setBuildVerify(perMerge: $0) })) {
+                    Text("Verify the app build before EACH task merge (+ fix)").font(AtelierFont.caption)
+                }.toggleStyle(.switch).controlSize(.small)
+                Toggle(isOn: Binding(get: { store.projectByID(project.id)?.buildVerifyFinal ?? false },
+                                     set: { setBuildVerify(final: $0) })) {
+                    Text("Final app build + fix pass once all tasks are merged").font(AtelierFont.caption)
+                }.toggleStyle(.switch).controlSize(.small)
+                Text("Command: \(cmd)").font(AtelierFont.eyebrow)
+                    .foregroundStyle(Color.atelierInkSecondary).textSelection(.enabled)
+            } else {
+                Text("This mode has no build command — app build unavailable; unit tests still gate.")
+                    .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.atelierSurface.opacity(0.35), in: RoundedRectangle(cornerRadius: AtelierCorner.control))
+        .overlay(RoundedRectangle(cornerRadius: AtelierCorner.control).stroke(Color.atelierDivider.opacity(0.6), lineWidth: 1))
+    }
+
+    private func setBuildVerify(perMerge: Bool? = nil, final: Bool? = nil) {
+        Task {
+            try? await store.updateProject(id: project.id) { p in
+                if let perMerge { p.buildVerifyBeforeMerge = perMerge }
+                if let final { p.buildVerifyFinal = final }
+            }
         }
     }
 
@@ -439,9 +478,11 @@ struct FeatureFlowView: View {
     }
 
     private func startFeatureAutopilot(_ featureTasks: [AtelierTask]) {
+        // Pick up the latest project (build-verify toggles the user may have just flipped).
+        let freshProject = store.projectByID(project.id) ?? project
         let toDo = featureTasks.filter { $0.status == .toDo }
         let batches = max(1, ExecutionPlanner.waves(tasks: toDo, allTasks: featureTasks).count)
-        featureRunner.start(project: project, feature: live, batches: batches, budgetCapUsd: nil,
+        featureRunner.start(project: freshProject, feature: live, batches: batches, budgetCapUsd: nil,
                             store: store, spawner: spawner, server: server, approvalQueue: approvalQueue)
     }
 
