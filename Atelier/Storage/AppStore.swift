@@ -19,7 +19,9 @@ final class AppStore {
     private(set) var workspaces: [Workspace] = []
     private(set) var projectsByWorkspace: [String: [Project]] = [:]
     private(set) var tasksByProject: [String: [AtelierTask]] = [:]
+    private(set) var tasksByFeature: [String: [AtelierTask]] = [:]   // O(1) feature-scoped lookups
     private(set) var featuresByProject: [String: [Feature]] = [:]
+    private(set) var featuresById: [String: Feature] = [:]           // O(1) featureByID
     private(set) var chatRooms: [ChatRoom] = []
     private(set) var isLoaded: Bool = false
 
@@ -75,7 +77,12 @@ final class AppStore {
                     do {
                         for try await tasks in taskObservation.values(in: self.db.dbPool) {
                             let grouped = Dictionary(grouping: tasks, by: \.projectId)
-                            await MainActor.run { self.tasksByProject = grouped }
+                            let byFeature = Dictionary(grouping: tasks.filter { $0.featureId != nil },
+                                                       by: { $0.featureId! })
+                            await MainActor.run {
+                                self.tasksByProject = grouped
+                                self.tasksByFeature = byFeature
+                            }
                         }
                     } catch {
                         await MainActor.run {
@@ -106,7 +113,11 @@ final class AppStore {
                     do {
                         for try await features in obs.values(in: self.db.dbPool) {
                             let grouped = Dictionary(grouping: features, by: \.projectId)
-                            await MainActor.run { self.featuresByProject = grouped }
+                            let byId = Dictionary(features.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                            await MainActor.run {
+                                self.featuresByProject = grouped
+                                self.featuresById = byId
+                            }
                         }
                     } catch {
                         await MainActor.run {
@@ -264,9 +275,7 @@ final class AppStore {
         (featuresByProject[projectId] ?? []).sorted { $0.createdAt > $1.createdAt }
     }
 
-    func featureByID(_ id: String) -> Feature? {
-        featuresByProject.values.flatMap { $0 }.first(where: { $0.id == id })
-    }
+    func featureByID(_ id: String) -> Feature? { featuresById[id] }
 
     @discardableResult
     func createFeature(in project: Project, name: String) async throws -> Feature {
@@ -291,7 +300,25 @@ final class AppStore {
         }
     }
 
+    /// Transactional read-modify-write of a feature: reads the committed row INSIDE the write txn,
+    /// applies `mutate`, and saves — so a concurrent writer touching a different field isn't clobbered
+    /// by a full-row overwrite off the (possibly lagging) observation cache. No-op if the row is gone.
+    func updateFeature(id: String, _ mutate: @escaping @Sendable (inout Feature) -> Void) async throws {
+        try await db.write { db in
+            guard var f = try Feature.filter(Feature.Columns.id == id).fetchOne(db) else { return }
+            mutate(&f)
+            f.updatedAt = Date()
+            try f.update(db)
+        }
+    }
+
     func deleteFeature(_ feature: Feature) async throws {
+        // Detach its tasks (clear featureId in the DB row + `.md` frontmatter) so none dangle at a
+        // now-missing feature. Callers should stop any in-flight run for this feature first.
+        for var t in tasks(inFeature: feature.id) {
+            t.featureId = nil
+            try? await updateTask(t)
+        }
         try await db.write { db in
             _ = try Feature.filter(Feature.Columns.id == feature.id).deleteAll(db)
         }
@@ -309,7 +336,7 @@ final class AppStore {
 
     /// A feature's tasks (feature-first flow), ordered by id for stable display.
     func tasks(inFeature featureId: String) -> [AtelierTask] {
-        tasksByProject.values.flatMap { $0 }.filter { $0.featureId == featureId }.sorted { $0.id < $1.id }
+        (tasksByFeature[featureId] ?? []).sorted { $0.id < $1.id }
     }
 
     func taskByID(_ id: String) -> AtelierTask? {

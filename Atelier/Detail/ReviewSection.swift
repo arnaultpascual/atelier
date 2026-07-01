@@ -1347,7 +1347,6 @@ struct ReviewSection: View {
         Task { try? await store.updateTaskStatus(task, to: .done) }
     }
 
-    private static let protectedBranches: Set<String> = ["main", "master", "develop", "development", "trunk", "release"]
 
     /// Merge the task's worktree branch into the project's current branch with `--no-ff` (the same
     /// plumbing autopilot uses), then mark the task Done and remove the worktree. If the current
@@ -1363,7 +1362,7 @@ struct ReviewSection: View {
         Task {
             do {
                 let base = try await GitService.currentBranch(projectPath: project.path)
-                if Self.protectedBranches.contains(base.lowercased()) {
+                if GitService.protectedBranches.contains(base.lowercased()) {
                     pendingBase = base
                     if newBranchName.isEmpty { newBranchName = "feature/\(BacklogMD.slugify(task.title))" }
                     merging = false

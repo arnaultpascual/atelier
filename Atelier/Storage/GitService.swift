@@ -31,6 +31,10 @@ enum GitService {
         case conflict(files: [String])   // merge left unmerged paths (MERGE_HEAD in progress)
     }
 
+    /// Branches we never merge onto automatically — callers offer a feature branch instead.
+    /// Single source of truth for the manual-merge guards (ReviewSection, FeatureFlowView).
+    static let protectedBranches: Set<String> = ["main", "master", "develop", "development", "trunk", "release"]
+
     enum Error: Swift.Error, LocalizedError {
         case gitNotFound
         case notARepo(String)

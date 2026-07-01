@@ -31,8 +31,6 @@ struct FeatureFlowView: View {
     @State private var finalizing = false
     @State private var mergeError: String?
 
-    private static let protectedBranches: Set<String> = ["main", "master", "develop", "development", "trunk", "release"]
-
     init(store: AppStore, spawner: TaskSpawner, server: ApprovalServer, approvalQueue: ApprovalQueue,
          featureRunner: FeatureBuildRunner, chatSpawner: ChatSpawner, project: Project, feature: Feature,
          selectedTaskID: Binding<String?>, onBack: @escaping () -> Void) {
@@ -321,7 +319,8 @@ struct FeatureFlowView: View {
             stageHeading(.building)
             autopilotBar(run: run, featureTasks: featureTasks)
             featureKanban(featureTasks: featureTasks, run: run)
-            advanceBar(primaryTitle: "Continue to Finish", canAdvance: run?.status == .finished)
+            // Also open the gate when a deliverable exists — the in-memory run is gone after a relaunch.
+            advanceBar(primaryTitle: "Continue to Finish", canAdvance: run?.status == .finished || live.deliverablePath != nil)
         }
     }
 
@@ -354,18 +353,21 @@ struct FeatureFlowView: View {
                     Button("Retry") { featureRunner.clearRun(featureId: feature.id); startFeatureAutopilot(featureTasks) }.controlSize(.small)
                 }
             } else {
+                let projectBusy = featureRunner.isProjectBusy(project.id)
                 Image(systemName: "infinity").foregroundStyle(Color.atelierAccent)
-                Text(runnable.isEmpty ? "No runnable task — add tasks in the Tasks stage."
-                                      : "\(featureTasks.count) task\(featureTasks.count == 1 ? "" : "s") ready to build.")
+                Text(projectBusy ? "Another build is running for this project — one at a time (they share the repo)."
+                     : (runnable.isEmpty ? "No runnable task — add tasks in the Tasks stage."
+                                         : "\(featureTasks.count) task\(featureTasks.count == 1 ? "" : "s") ready to build."))
                     .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
                 Spacer()
                 Button(action: { startFeatureAutopilot(featureTasks) }) {
                     Label("Start autopilot", systemImage: "play.fill").fontWeight(.semibold)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!server.helperReady || runnable.isEmpty)
-                .help(server.helperReady ? "Build this feature's tasks: dev → test gate → review → merge → re-test."
-                                         : "The approval helper isn't ready yet.")
+                .disabled(!server.helperReady || runnable.isEmpty || projectBusy)
+                .help(!server.helperReady ? "The approval helper isn't ready yet."
+                      : projectBusy ? "Finish or stop the other build for this project first."
+                                    : "Build this feature's tasks: dev → test gate → review → merge → re-test.")
             }
         }
         .padding(12)
@@ -374,10 +376,11 @@ struct FeatureFlowView: View {
     }
 
     private func featureKanban(featureTasks: [AtelierTask], run: AutopilotRun?) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        let byStatus = Dictionary(grouping: featureTasks, by: \.status)
+        return ScrollView(.horizontal, showsIndicators: false) {
             HStack(alignment: .top, spacing: 12) {
                 ForEach(AtelierTask.Status.kanbanOrder, id: \.self) { status in
-                    let colTasks = featureTasks.filter { $0.status == status }
+                    let colTasks = byStatus[status] ?? []
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 6) {
                             Text(status.displayName).font(AtelierFont.eyebrow.weight(.semibold)).foregroundStyle(Color.atelierInkSecondary)
@@ -403,10 +406,10 @@ struct FeatureFlowView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(t.title).font(AtelierFont.eyebrow.weight(.medium)).foregroundStyle(Color.atelierInk)
                     .lineLimit(2).multilineTextAlignment(.leading)
-                if let phase, let label = phaseLabel(phase) {
+                if let phase {
                     HStack(spacing: 3) {
-                        if phaseIsActive(phase) { ProgressView().controlSize(.mini).scaleEffect(0.6) }
-                        Text(label).font(.system(size: 9)).foregroundStyle(phaseColor(phase)).lineLimit(1)
+                        if phase.isActive { ProgressView().controlSize(.mini).scaleEffect(0.6) }
+                        Text(phase.label).font(.system(size: 9)).foregroundStyle(phaseColor(phase)).lineLimit(1)
                     }
                 }
             }
@@ -424,26 +427,6 @@ struct FeatureFlowView: View {
 
     private func autopilotStatusText(_ run: AutopilotRun) -> String {
         "Building… round \(run.currentRound), \(mergedCount(run))/\(run.taskPhases.count) merged · $\(String(format: "%.2f", run.totalCostUsd))"
-    }
-
-    private func phaseLabel(_ p: TaskPhase) -> String? {
-        switch p {
-        case .queued: return "queued"
-        case .building: return "building"
-        case .buildingVerify: return "build-verify"
-        case .testing: return "testing"
-        case .reviewing: return "reviewing"
-        case .fixing(let n): return "fixing (\(n))"
-        case .merging: return "merging"
-        case .verifyingMerge: return "verifying"
-        case .resolvingConflict: return "resolving conflict"
-        case .done: return "merged"
-        case .blocked(let r): return "blocked: \(r)"
-        }
-    }
-
-    private func phaseIsActive(_ p: TaskPhase) -> Bool {
-        switch p { case .done, .blocked, .queued: return false; default: return true }
     }
 
     private func phaseColor(_ p: TaskPhase) -> Color {
@@ -595,9 +578,7 @@ struct FeatureFlowView: View {
     private func ensureBriefRoomIfNeeded() async {
         guard viewedStage == .brief, live.briefRoomId == nil else { return }
         guard let room = try? await store.createBriefRoom(projectId: project.id) else { return }
-        var f = store.featureByID(feature.id) ?? feature
-        f.briefRoomId = room.id
-        try? await store.updateFeature(f)
+        try? await store.updateFeature(id: feature.id) { $0.briefRoomId = room.id }
     }
 
     // MARK: ③ Tasks actions
@@ -611,7 +592,8 @@ struct FeatureFlowView: View {
         decomposeError = nil
         let profileSnapshot = profile
         let projectSnapshot = project
-        let titles = store.tasks(in: project.id).map(\.title)
+        // Dedup within THIS feature — not the whole project — so it matches the feature-scoped write.
+        let titles = store.tasks(inFeature: feature.id).map(\.title)
         let repoPath = inspectRepo ? project.path : nil
         let featureId = feature.id
         Task {
@@ -651,9 +633,7 @@ struct FeatureFlowView: View {
     private func markDoneOnly() {
         finalizing = true
         Task {
-            var f = store.featureByID(feature.id) ?? feature
-            f.completedAt = Date()
-            try? await store.updateFeature(f)
+            try? await store.updateFeature(id: feature.id) { $0.completedAt = Date() }
             await MainActor.run { finalizing = false }
         }
     }
@@ -667,7 +647,7 @@ struct FeatureFlowView: View {
         Task {
             do {
                 let base = try await GitService.currentBranch(projectPath: projectPath)
-                if Self.protectedBranches.contains(base.lowercased()) {
+                if GitService.protectedBranches.contains(base.lowercased()) {
                     await MainActor.run {
                         finalizing = false
                         mergeError = "You're on protected branch “\(base)”. Check out your integration/feature branch, or merge \(branch) by hand."
@@ -677,9 +657,7 @@ struct FeatureFlowView: View {
                 let result = try await GitService.merge(into: base, branch: branch, projectPath: projectPath)
                 switch result {
                 case .clean, .upToDate:
-                    var f = store.featureByID(feature.id) ?? feature
-                    f.completedAt = Date()
-                    try? await store.updateFeature(f)
+                    try? await store.updateFeature(id: feature.id) { $0.completedAt = Date() }
                     await MainActor.run { finalizing = false }
                 case .conflict(let files):
                     try? await GitService.abortMerge(projectPath: projectPath)
@@ -697,9 +675,7 @@ struct FeatureFlowView: View {
     private func advance(to next: Feature.Stage) {
         advancing = true
         Task {
-            var f = store.featureByID(feature.id) ?? feature
-            if next.order > f.stage.order { f.stage = next }
-            try? await store.updateFeature(f)
+            try? await store.updateFeature(id: feature.id) { if next.order > $0.stage.order { $0.stage = next } }
             await MainActor.run { advancing = false; viewedStage = next }
         }
     }
@@ -707,9 +683,7 @@ struct FeatureFlowView: View {
     private func completeFeature() {
         advancing = true
         Task {
-            var f = store.featureByID(feature.id) ?? feature
-            f.completedAt = Date()
-            try? await store.updateFeature(f)
+            try? await store.updateFeature(id: feature.id) { $0.completedAt = Date() }
             await MainActor.run { advancing = false }
         }
     }

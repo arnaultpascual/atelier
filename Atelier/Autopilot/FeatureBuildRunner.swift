@@ -16,6 +16,28 @@ enum TaskPhase: Equatable {
     case resolvingConflict
     case done
     case blocked(reason: String)
+
+    /// Short human label for the phase chips — single source of truth for the kanban + feature flow.
+    var label: String {
+        switch self {
+        case .queued: return "queued"
+        case .building: return "building"
+        case .buildingVerify: return "build-verify"
+        case .testing: return "testing"
+        case .reviewing: return "reviewing"
+        case .fixing(let n): return "fixing (\(n))"
+        case .merging: return "merging"
+        case .verifyingMerge: return "verifying"
+        case .resolvingConflict: return "resolving conflict"
+        case .done: return "merged"
+        case .blocked(let r): return "blocked: \(r)"
+        }
+    }
+
+    /// Whether the phase represents in-flight work (drives the spinner).
+    var isActive: Bool {
+        switch self { case .done, .blocked, .queued: return false; default: return true }
+    }
 }
 
 /// Live state of one project's autopilot run. `@Observable` so the UI tracks phase/cost/round.
@@ -129,7 +151,8 @@ final class FeatureBuildRunner {
                server: ApprovalServer,
                approvalQueue: ApprovalQueue) {
         let scopeId = feature?.id ?? project.id
-        guard !isActive(scopeId: scopeId) else { return }
+        // One run per project working tree (a project run and a feature run can't safely share it).
+        guard !hasActiveRun(forProject: project.id) else { return }
         let run = AutopilotRun(projectId: project.id,
                                featureId: feature?.id,
                                batchesRequested: max(1, batches),
@@ -209,9 +232,9 @@ final class FeatureBuildRunner {
                 run.originalBase = base        // remember where we branched from
                 run.baseBranch = integration   // task worktrees branch off this; merges land here
                 // Link the integration branch back to the feature so the flow's finish stage finds it.
-                if let fid = run.featureId, var feature = deps.store.featureByID(fid) {
-                    feature.integrationBranch = integration
-                    try? await deps.store.updateFeature(feature)
+                if let fid = run.featureId {
+                    let branch = integration
+                    try? await deps.store.updateFeature(id: fid) { $0.integrationBranch = branch }
                 }
             } else {
                 // Resume (e.g. after a usage-limit pause): the feature branch already exists.
@@ -238,9 +261,10 @@ final class FeatureBuildRunner {
             if safety > maxRoundsCeiling { finish(run, .failed("Round ceiling reached.")); return }
             if overBudget(run) { finish(run, .failed(budgetMessage(run))); return }
 
-            let allTasks = scopedTasks(run, deps)
-            let todo = allTasks.filter { $0.status == .toDo }
-            let wave = ExecutionPlanner.runnableNow(tasks: todo, allTasks: allTasks)
+            let todo = scopedTasks(run, deps).filter { $0.status == .toDo }
+            // Resolve dependency status against ALL project tasks, not just the scope — so a dep on a
+            // task outside this run's scope correctly blocks (vs. defaulting to "done" when unseen).
+            let wave = ExecutionPlanner.runnableNow(tasks: todo, allTasks: deps.store.tasks(in: deps.project.id))
             if wave.isEmpty { break }   // nothing runnable now → natural finish (deadlock or done)
 
             run.currentRound += 1
@@ -673,7 +697,7 @@ final class FeatureBuildRunner {
         if !profile.build.fastTestCommands.isEmpty {
             var result = await TestRunner.runFastTests(profile: profile, worktreePath: deps.project.path, mainRepoPath: deps.project.path)
             var pass = 0
-            while !result.passed && !result.toolchainMissing && pass < maxFixPasses && run.status == .running {
+            while !result.passed && !result.toolchainMissing && pass < maxFixPasses && run.status == .running && !overBudget(run) {
                 pass += 1
                 let outcome = await deps.spawner.runManagedWorker(
                     label: "feature-fix",
@@ -705,7 +729,7 @@ final class FeatureBuildRunner {
 
         // (3c) SOFT coverage-improvement round (opt-in): below the aim → one tests-first round on the
         // integration branch (in place), then re-test (stay green) + re-measure. Never a gate.
-        if deps.project.coverageImprovementRound, run.status == .running,
+        if deps.project.coverageImprovementRound, run.status == .running, !overBudget(run),
            let target = profile.build.coverageTarget, let rate = coverageRate, rate * 100 < Double(target) {
             let outcome = await deps.spawner.runManagedWorker(
                 label: "coverage-round",
@@ -737,9 +761,9 @@ final class FeatureBuildRunner {
         let url = FeatureDeliverableStore.persist(deliverable, projectPath: deps.project.path)
         run.deliverablePath = url.path
         // Link the deliverable back to the feature so the flow's finish stage can surface it.
-        if let fid = run.featureId, var feature = deps.store.featureByID(fid) {
-            feature.deliverablePath = url.path
-            try? await deps.store.updateFeature(feature)
+        if let fid = run.featureId {
+            let path = url.path
+            try? await deps.store.updateFeature(id: fid) { $0.deliverablePath = path }
         }
         logger.notice("feature synthesis wrote \(url.lastPathComponent, privacy: .public)")
     }
@@ -802,10 +826,27 @@ final class FeatureBuildRunner {
         ProjectProfile.find(id: deps.project.profileId) ?? .generic
     }
 
-    /// Tasks in this run's scope: the feature's tasks for a feature run, else all project tasks.
+    /// Tasks in this run's scope: the feature's tasks for a feature run, else the project's LOOSE
+    /// tasks (feature-owned tasks are built by their own feature run — never double-built here).
     private func scopedTasks(_ run: AutopilotRun, _ deps: Deps) -> [AtelierTask] {
         if let fid = run.featureId { return deps.store.tasks(inFeature: fid) }
-        return deps.store.tasks(in: deps.project.id)
+        return deps.store.tasks(in: deps.project.id).filter { $0.featureId == nil }
+    }
+
+    /// True if any run is live for this project (project- or feature-scoped) — they share the repo
+    /// working tree, so the UI disables Start while one is running.
+    func isProjectBusy(_ projectId: String) -> Bool { hasActiveRun(forProject: projectId) }
+
+    /// Any live run (project- OR feature-scoped) for this project. They share the repo working tree,
+    /// so at most one may run at a time — the start guard uses this instead of a per-scope check.
+    private func hasActiveRun(forProject projectId: String) -> Bool {
+        runs.values.contains { run in
+            guard run.projectId == projectId else { return false }
+            switch run.status {
+            case .running, .stopping, .paused: return true
+            case .finished, .failed: return false
+            }
+        }
     }
 
     /// Updates a task's TDD state / summary / status in one write, off a fresh copy so it never
