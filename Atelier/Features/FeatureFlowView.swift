@@ -452,6 +452,18 @@ struct FeatureFlowView: View {
                         Text(phase.label).font(.system(size: 9)).foregroundStyle(phaseColor(phase)).lineLimit(1)
                     }
                 }
+                // Live progress reported by the worker over the MCP capability bridge.
+                if let prog = store.taskProgress[t.id] {
+                    HStack(spacing: 4) {
+                        Text("\(prog.pct)%")
+                            .font(.system(size: 9, weight: .semibold)).monospacedDigit()
+                            .foregroundStyle(Color.atelierAccent)
+                        if let note = prog.note, !note.isEmpty {
+                            Text(note).font(.system(size: 9))
+                                .foregroundStyle(Color.atelierInkSecondary).lineLimit(1)
+                        }
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
         }

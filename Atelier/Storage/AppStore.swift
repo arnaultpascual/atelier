@@ -25,6 +25,29 @@ final class AppStore {
     private(set) var chatRooms: [ChatRoom] = []
     private(set) var isLoaded: Bool = false
 
+    /// Live, EPHEMERAL per-task build progress reported by workers over the MCP
+    /// capability bridge. Not persisted (no migration, no git/frontmatter churn);
+    /// resets on relaunch. SwiftUI reads `taskProgress[taskId]` for a live %.
+    struct TaskProgress: Sendable, Equatable {
+        var pct: Int
+        var note: String?
+        var updatedAt: Date
+    }
+    private(set) var taskProgress: [String: TaskProgress] = [:]
+
+    /// Records a worker's progress ping (clamped 0–100). Observation-driven → the
+    /// kanban updates live. No DB write.
+    func reportProgress(taskId: String, pct: Int, note: String?) {
+        taskProgress[taskId] = TaskProgress(pct: max(0, min(100, pct)),
+                                            note: note,
+                                            updatedAt: Date())
+    }
+
+    /// Clears a task's transient progress (e.g. once it merges/completes).
+    func clearProgress(taskId: String) {
+        taskProgress[taskId] = nil
+    }
+
     private var observationTask: Task<Void, Never>?
 
     init() {

@@ -32,6 +32,13 @@ final class ApprovalQueue {
     /// the inbox during an autonomous run.
     private var autopilotAgents: Set<String> = []
 
+    /// Agents handed the first-party Atelier MCP capability config. Their
+    /// `mcp__atelier__*` tool calls (and `ReadMcpResourceTool` for our resources)
+    /// are internal domain calls, not user-gated actions — auto-accepted so they
+    /// never spam the approval inbox. Capability only; the approval flow itself
+    /// is untouched.
+    private var mcpCapabilityAgents: Set<String> = []
+
     /// Composite rule lists keyed by agentId, in evaluation order: per-run
     /// (added on the fly) → per-project (loaded from config.yml) → profile
     /// defaults. First matching rule wins.
@@ -68,6 +75,18 @@ final class ApprovalQueue {
         perAgentContext.removeValue(forKey: agentId)
         perAgentProject.removeValue(forKey: agentId)
         autopilotAgents.remove(agentId)
+        mcpCapabilityAgents.remove(agentId)
+    }
+
+    /// Marks (or unmarks) an agent as carrying the Atelier MCP capability config,
+    /// so `enqueue` auto-accepts its first-party `mcp__atelier__*` / resource calls.
+    func setMCPCapability(_ on: Bool, forAgent agentId: String) {
+        if on { mcpCapabilityAgents.insert(agentId) } else { mcpCapabilityAgents.remove(agentId) }
+    }
+
+    /// Whether a tool call is a first-party Atelier MCP capability call.
+    private func isFirstPartyMCPTool(_ toolName: String) -> Bool {
+        toolName.hasPrefix("mcp__atelier__") || toolName == "ReadMcpResourceTool"
     }
 
     /// Marks (or unmarks) an agent as autopilot-driven. While set, `enqueue` auto-accepts any
@@ -90,6 +109,14 @@ final class ApprovalQueue {
         // 1. Per-run tool whitelist (the original "Always for this run" path).
         if let allowed = autoAcceptTools[approval.agentId],
            allowed.contains(approval.toolName) {
+            resolveImmediately(approval, with: .accept(updatedInput: nil))
+            return
+        }
+        // 1.5 First-party MCP capability tools for agents we handed the atelier MCP
+        //     config. These are internal domain calls (progress, resource reads),
+        //     not user-gated actions — never queue them for the human.
+        if mcpCapabilityAgents.contains(approval.agentId),
+           isFirstPartyMCPTool(approval.toolName) {
             resolveImmediately(approval, with: .accept(updatedInput: nil))
             return
         }

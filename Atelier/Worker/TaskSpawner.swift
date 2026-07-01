@@ -313,6 +313,36 @@ final class TaskSpawner {
             return
         }
 
+        // 5b. Optional MCP capability layer — feature-scoped, behind the kill-switch.
+        //     Additive: on any failure we log and continue with the pure file+git
+        //     contract (no MCP), never failing the spawn.
+        var mcpConfigURL: URL? = nil
+        var mcpBridge: AtelierBridgeListener? = nil
+        if MCPCapability.isEnabled, let featureId = task.featureId {
+            let bridge = AtelierBridgeListener(agentId: agentId.uuidString,
+                                               featureId: featureId,
+                                               projectPath: project.path,
+                                               store: store)
+            do {
+                let mcpSocket = try await bridge.start()
+                mcpConfigURL = try MCPServerConfig.writeTemporaryConfig(
+                    agentId: agentId,
+                    socketPath: mcpSocket,
+                    featureId: featureId,
+                    taskId: task.id,
+                    projectPath: project.path
+                )
+                mcpBridge = bridge
+                approvalQueue.setMCPCapability(true, forAgent: agentId.uuidString)
+                logger.info("mcp capability on: socket=\(mcpSocket, privacy: .public)")
+            } catch {
+                logger.warning("mcp capability setup failed, continuing without: \(error.localizedDescription, privacy: .public)")
+                await bridge.stop(reason: "mcp setup failed")
+                mcpConfigURL = nil
+                mcpBridge = nil
+            }
+        }
+
         // 6. Build prompt and additional dirs
         let prompt = Self.buildPrompt(task: task, project: project, profile: profile, worktree: worktree)
         let attachmentsDir = URL(fileURLWithPath: project.path)
@@ -340,7 +370,8 @@ final class TaskSpawner {
             includePartialMessages: false,
             maxTurns: 80,
             resumeSessionId: nil,
-            extraEnv: ToolchainChecker.environmentExports(profile: profile, mainRepoPath: project.path)
+            extraEnv: ToolchainChecker.environmentExports(profile: profile, mainRepoPath: project.path),
+            mcpConfigPath: mcpConfigURL?.path
         )
 
         run.statusHint = ""
@@ -448,6 +479,11 @@ final class TaskSpawner {
         // 10. Cleanup temp config + socket
         MCPConfig.cleanup(configURL)
         await listener.stop(reason: "worker finished")
+        if let mcpConfigURL { MCPServerConfig.cleanup(mcpConfigURL) }
+        if let mcpBridge {
+            await mcpBridge.stop(reason: "worker finished")
+            approvalQueue.setMCPCapability(false, forAgent: agentId.uuidString)
+        }
     }
 
     /// Re-spawns a worker that `--resume`s a prior claude session for the given

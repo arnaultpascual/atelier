@@ -28,6 +28,9 @@ I built a toy stdio MCP server (`initialize`/`tools/list`/`tools/call`/`resource
 | 5 | `--mcp-config` **+ `--settings` hook** together, `default` mode | ✅ works — **the PreToolUse hook fires for `mcp__atelier__ping` and `ReadMcpResourceTool`**; its `permissionDecision:"allow"` auto-approves them |
 | 6 | MCP server binary **missing** | ✅ `status: failed`, worker still completes normally (exit 0) — file+git fallback holds |
 | 7 | `--disallowed-tools "ToolSearch" "Agent"` | ✅ MCP tool is called **directly** (no ToolSearch hop needed) |
+| 8 | tool named with a **dot** (`task.report_progress`) | ❌ **silently dropped** — never appears in the tool list. Dots are invalid (API name regex `^[a-zA-Z0-9_-]{1,64}$`). Underscore variant works. |
+
+**Naming rule (from Test 8):** tool names use **underscores**, not dots: `task_report_progress`, `brief_append_section`, `spec_record_finding`, `coverage_get`, `wave_mark_done`, … (`mcp__atelier__` prefix is 14 chars; keep the suffix ≤ 50).
 
 ### The one assumption that was wrong
 The brief (§2.5) hoped stdio servers via `--mcp-config` would be **auto-trusted** in headless `-p`. **They are not** — a bare `mcp__atelier__*` call is denied in `default` mode. This is *not* a blocker; three levers make our own tools pass silently (see §6). It does mean "MCP = capability only, never permissions" (§2.1) needs a nuance: we must **explicitly allow our own tool prefix**, but we do **not** change the approval *flow* — we add a prefix to the allow set / hook auto-approve. Guardrail intact.
