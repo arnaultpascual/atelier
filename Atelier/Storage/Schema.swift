@@ -209,6 +209,14 @@ enum Schema {
             try db.create(index: "feature_project", on: "feature", columns: ["projectId"])
         }
 
+        // v11 — link a task to its feature (feature-first flow). Also written to the task's `.md`
+        // frontmatter as `feature_id` (source of truth), so it survives a disk re-import.
+        migrator.registerMigration("v11_task_feature") { db in
+            try db.alter(table: "task") { t in
+                t.add(column: "featureId", .text)
+            }
+        }
+
         try migrator.migrate(pool)
     }
 }

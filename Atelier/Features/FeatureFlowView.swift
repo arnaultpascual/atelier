@@ -20,6 +20,11 @@ struct FeatureFlowView: View {
     @State private var viewedStage: Feature.Stage
     @State private var toolchain: ToolchainChecker.Report?
     @State private var advancing = false
+    // ③ Tasks
+    @State private var decomposing = false
+    @State private var decomposeError: String?
+    @State private var inspectRepo = true
+    @State private var quickAddTitle = ""
 
     init(store: AppStore, spawner: TaskSpawner, server: ApprovalServer, approvalQueue: ApprovalQueue,
          featureRunner: FeatureBuildRunner, chatSpawner: ChatSpawner, project: Project, feature: Feature,
@@ -131,7 +136,9 @@ struct FeatureFlowView: View {
         switch viewedStage {
         case .prerequisites: prerequisitesStage
         case .brief: briefStage
-        case .tasks, .building, .finish: placeholder(viewedStage)
+        case .tasks: tasksStage
+        case .building: buildStage
+        case .finish: placeholder(viewedStage)
         }
     }
 
@@ -194,7 +201,253 @@ struct FeatureFlowView: View {
         return !(room.briefText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    // ③–⑤ — placeholders until their phase wires the existing component.
+    // ③ Tasks — wired: decompose the feature's brief into its own tasks, editable inline.
+    private var tasksStage: some View {
+        let featureTasks = store.tasks(inFeature: feature.id)
+        return VStack(alignment: .leading, spacing: 16) {
+            stageHeading(.tasks)
+            if featureTasks.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Decompose the brief into a task list. You can then edit each task, add or remove some, before building.")
+                        .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Toggle(isOn: $inspectRepo) {
+                        Text("Inspect the repo so tasks reference real files (slower, pricier)").font(AtelierFont.caption)
+                    }
+                    .toggleStyle(.switch).controlSize(.small)
+                    Button(action: decomposeIntoFeature) {
+                        HStack(spacing: 6) {
+                            if decomposing { ProgressView().controlSize(.small) }
+                            else { Image(systemName: "wand.and.stars") }
+                            Text(decomposing ? "Decomposing…" : "Decompose brief into tasks").fontWeight(.semibold)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent).disabled(decomposing || !briefReady)
+                    if !briefReady {
+                        Text("Write the brief first (stage ②).").font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                    }
+                    if let err = decomposeError { CalloutBanner(.danger, err) }
+                }
+            } else {
+                HStack {
+                    Text("\(featureTasks.count) task\(featureTasks.count == 1 ? "" : "s")")
+                        .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
+                    Spacer()
+                    Button(action: decomposeIntoFeature) {
+                        HStack(spacing: 4) {
+                            if decomposing { ProgressView().controlSize(.mini) }
+                            else { Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 10)) }
+                            Text(decomposing ? "Decomposing…" : "Re-decompose").font(AtelierFont.caption)
+                        }
+                    }
+                    .buttonStyle(.plain).foregroundStyle(Color.atelierAccent).disabled(decomposing)
+                    .help("Generate more tasks from the brief (adds to the list).")
+                }
+                VStack(spacing: 8) { ForEach(featureTasks) { featureTaskRow($0) } }
+                quickAddRow
+                if let err = decomposeError { CalloutBanner(.danger, err) }
+            }
+            advanceBar(primaryTitle: "Continue to Build", canAdvance: !featureTasks.isEmpty)
+        }
+    }
+
+    private func featureTaskRow(_ t: AtelierTask) -> some View {
+        HStack(spacing: 10) {
+            Button { selectedTaskID = t.id } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(t.title).font(AtelierFont.caption.weight(.medium)).foregroundStyle(Color.atelierInk)
+                        .lineLimit(1)
+                    HStack(spacing: 8) {
+                        if let p = t.priority {
+                            Text(p.displayName.uppercased()).font(AtelierFont.eyebrow).foregroundStyle(Color.atelierAccent)
+                        }
+                        if !t.labels.isEmpty {
+                            Text(t.labels.joined(separator: ", ")).font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                        }
+                        if !t.dependsOn.isEmpty {
+                            Label("\(t.dependsOn.count)", systemImage: "arrow.turn.down.right")
+                                .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                        }
+                        Text(t.status.displayName).font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary.opacity(0.7))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Open to edit / iterate on this task.")
+            Button { deleteTask(t) } label: { Image(systemName: "trash").font(.system(size: 11)) }
+                .buttonStyle(.plain).foregroundStyle(Color.atelierInkSecondary)
+                .help("Delete this task.")
+        }
+        .padding(10)
+        .background(Color.atelierSurface.opacity(0.5), in: RoundedRectangle(cornerRadius: AtelierCorner.control))
+        .overlay(RoundedRectangle(cornerRadius: AtelierCorner.control).stroke(Color.atelierDivider, lineWidth: 1))
+    }
+
+    private var quickAddRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "plus.circle").foregroundStyle(Color.atelierAccent)
+            TextField("Add a task by hand…", text: $quickAddTitle)
+                .textFieldStyle(.plain).onSubmit(quickAddTask)
+            Button("Add", action: quickAddTask)
+                .controlSize(.small)
+                .disabled(quickAddTitle.trimmingCharacters(in: .whitespaces).isEmpty)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(Color.atelierSurface.opacity(0.3), in: RoundedRectangle(cornerRadius: AtelierCorner.control))
+        .overlay(RoundedRectangle(cornerRadius: AtelierCorner.control).stroke(Color.atelierDivider.opacity(0.6), lineWidth: 1))
+    }
+
+    // ④ Build — wired: feature-scoped kanban + autopilot (runs only this feature's tasks).
+    private var buildStage: some View {
+        let featureTasks = store.tasks(inFeature: feature.id)
+        let run = featureRunner.run(forFeature: feature.id)
+        return VStack(alignment: .leading, spacing: 16) {
+            stageHeading(.building)
+            autopilotBar(run: run, featureTasks: featureTasks)
+            featureKanban(featureTasks: featureTasks, run: run)
+            advanceBar(primaryTitle: "Continue to Finish", canAdvance: run?.status == .finished)
+        }
+    }
+
+    @ViewBuilder
+    private func autopilotBar(run: AutopilotRun?, featureTasks: [AtelierTask]) -> some View {
+        let runnable = ExecutionPlanner.runnableNow(tasks: featureTasks.filter { $0.status == .toDo }, allTasks: featureTasks)
+        HStack(spacing: 10) {
+            if let run {
+                switch run.status {
+                case .running, .stopping:
+                    ProgressView().controlSize(.small)
+                    Text(autopilotStatusText(run)).font(AtelierFont.caption).foregroundStyle(Color.atelierInk)
+                    Spacer()
+                    Button("Stop") { featureRunner.stop(featureId: feature.id, force: false) }.controlSize(.small)
+                case .paused(let msg):
+                    Image(systemName: "pause.circle.fill").foregroundStyle(Palette.warning)
+                    Text(msg).font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary).lineLimit(2)
+                    Spacer()
+                    Button("Resume") { featureRunner.resume(featureId: feature.id) }.controlSize(.small)
+                case .finished:
+                    Image(systemName: "checkmark.seal.fill").foregroundStyle(Palette.success)
+                    Text("Autopilot finished — \(mergedCount(run))/\(run.taskPhases.count) merged · $\(String(format: "%.2f", run.totalCostUsd)).")
+                        .font(AtelierFont.caption).foregroundStyle(Color.atelierInk)
+                    Spacer()
+                    Button("Run again") { featureRunner.clearRun(featureId: feature.id); startFeatureAutopilot(featureTasks) }.controlSize(.small)
+                case .failed(let msg):
+                    Image(systemName: "xmark.octagon.fill").foregroundStyle(Palette.error)
+                    Text(msg).font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary).lineLimit(2)
+                    Spacer()
+                    Button("Retry") { featureRunner.clearRun(featureId: feature.id); startFeatureAutopilot(featureTasks) }.controlSize(.small)
+                }
+            } else {
+                Image(systemName: "infinity").foregroundStyle(Color.atelierAccent)
+                Text(runnable.isEmpty ? "No runnable task — add tasks in the Tasks stage."
+                                      : "\(featureTasks.count) task\(featureTasks.count == 1 ? "" : "s") ready to build.")
+                    .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
+                Spacer()
+                Button(action: { startFeatureAutopilot(featureTasks) }) {
+                    Label("Start autopilot", systemImage: "play.fill").fontWeight(.semibold)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!server.helperReady || runnable.isEmpty)
+                .help(server.helperReady ? "Build this feature's tasks: dev → test gate → review → merge → re-test."
+                                         : "The approval helper isn't ready yet.")
+            }
+        }
+        .padding(12)
+        .background(Color.atelierSurface.opacity(0.5), in: RoundedRectangle(cornerRadius: AtelierCorner.card))
+        .overlay(RoundedRectangle(cornerRadius: AtelierCorner.card).stroke(Color.atelierDivider, lineWidth: 1))
+    }
+
+    private func featureKanban(featureTasks: [AtelierTask], run: AutopilotRun?) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 12) {
+                ForEach(AtelierTask.Status.kanbanOrder, id: \.self) { status in
+                    let colTasks = featureTasks.filter { $0.status == status }
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Text(status.displayName).font(AtelierFont.eyebrow.weight(.semibold)).foregroundStyle(Color.atelierInkSecondary)
+                            Text("\(colTasks.count)").font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary.opacity(0.7))
+                        }
+                        if colTasks.isEmpty {
+                            Text("—").font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary.opacity(0.4))
+                        } else {
+                            ForEach(colTasks) { buildTaskCard($0, phase: run?.taskPhases[$0.id]) }
+                        }
+                    }
+                    .frame(width: 178, alignment: .top)
+                    .padding(10)
+                    .background(Color.atelierSurface.opacity(0.3), in: RoundedRectangle(cornerRadius: AtelierCorner.control))
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func buildTaskCard(_ t: AtelierTask, phase: TaskPhase?) -> some View {
+        Button { selectedTaskID = t.id } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(t.title).font(AtelierFont.eyebrow.weight(.medium)).foregroundStyle(Color.atelierInk)
+                    .lineLimit(2).multilineTextAlignment(.leading)
+                if let phase, let label = phaseLabel(phase) {
+                    HStack(spacing: 3) {
+                        if phaseIsActive(phase) { ProgressView().controlSize(.mini).scaleEffect(0.6) }
+                        Text(label).font(.system(size: 9)).foregroundStyle(phaseColor(phase)).lineLimit(1)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(8)
+        .background(Color.atelierBackground.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
+        .help("Open to inspect this task.")
+    }
+
+    private func mergedCount(_ run: AutopilotRun) -> Int {
+        run.taskPhases.values.filter { $0 == .done }.count
+    }
+
+    private func autopilotStatusText(_ run: AutopilotRun) -> String {
+        "Building… round \(run.currentRound), \(mergedCount(run))/\(run.taskPhases.count) merged · $\(String(format: "%.2f", run.totalCostUsd))"
+    }
+
+    private func phaseLabel(_ p: TaskPhase) -> String? {
+        switch p {
+        case .queued: return "queued"
+        case .building: return "building"
+        case .buildingVerify: return "build-verify"
+        case .testing: return "testing"
+        case .reviewing: return "reviewing"
+        case .fixing(let n): return "fixing (\(n))"
+        case .merging: return "merging"
+        case .verifyingMerge: return "verifying"
+        case .resolvingConflict: return "resolving conflict"
+        case .done: return "merged"
+        case .blocked(let r): return "blocked: \(r)"
+        }
+    }
+
+    private func phaseIsActive(_ p: TaskPhase) -> Bool {
+        switch p { case .done, .blocked, .queued: return false; default: return true }
+    }
+
+    private func phaseColor(_ p: TaskPhase) -> Color {
+        switch p {
+        case .done: return Palette.success
+        case .blocked: return Palette.error
+        case .queued: return Color.atelierInkSecondary
+        default: return Color.atelierAccent
+        }
+    }
+
+    private func startFeatureAutopilot(_ featureTasks: [AtelierTask]) {
+        let toDo = featureTasks.filter { $0.status == .toDo }
+        let batches = max(1, ExecutionPlanner.waves(tasks: toDo, allTasks: featureTasks).count)
+        featureRunner.start(project: project, feature: live, batches: batches, budgetCapUsd: nil,
+                            store: store, spawner: spawner, server: server, approvalQueue: approvalQueue)
+    }
+
+    // ⑤ — placeholder until the finish phase wires the deliverable surface.
     private func placeholder(_ s: Feature.Stage) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             stageHeading(s)
@@ -266,7 +519,11 @@ struct FeatureFlowView: View {
     }
 
     private var advanceHint: String {
-        viewedStage == .brief ? "Write or refine the brief first." : ""
+        switch viewedStage {
+        case .brief: return "Write or refine the brief first."
+        case .building: return "Run the autopilot to completion first."
+        default: return ""
+        }
     }
 
     private func nextStage(after s: Feature.Stage) -> Feature.Stage? {
@@ -282,6 +539,52 @@ struct FeatureFlowView: View {
         var f = store.featureByID(feature.id) ?? feature
         f.briefRoomId = room.id
         try? await store.updateFeature(f)
+    }
+
+    // MARK: ③ Tasks actions
+
+    /// Decompose the feature's (refined) brief into tasks, each stamped with this feature's id.
+    /// Additive — a re-decompose appends more tasks to the list.
+    private func decomposeIntoFeature() {
+        guard let roomId = live.briefRoomId, let room = store.chatRoom(id: roomId),
+              let brief = room.briefText?.trimmingCharacters(in: .whitespacesAndNewlines), !brief.isEmpty else { return }
+        decomposing = true
+        decomposeError = nil
+        let profileSnapshot = profile
+        let projectSnapshot = project
+        let titles = store.tasks(in: project.id).map(\.title)
+        let repoPath = inspectRepo ? project.path : nil
+        let featureId = feature.id
+        Task {
+            do {
+                let drafts = try await AIAssistant.decomposeBrief(
+                    brief, project: projectSnapshot, profile: profileSnapshot,
+                    existingTitles: titles, repoPath: repoPath)
+                guard !drafts.isEmpty else {
+                    await MainActor.run { decomposing = false; decomposeError = "The decomposer returned no tasks — refine the brief and try again." }
+                    return
+                }
+                _ = try await store.createTasks(fromDrafts: drafts, in: projectSnapshot, featureId: featureId)
+                await MainActor.run { decomposing = false }
+            } catch {
+                await MainActor.run { decomposing = false; decomposeError = "Decomposition failed: \(error.localizedDescription)" }
+            }
+        }
+    }
+
+    private func quickAddTask() {
+        let title = quickAddTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        let featureId = feature.id
+        let projectSnapshot = project
+        Task {
+            _ = try? await store.createTask(in: projectSnapshot, title: title, featureId: featureId)
+            await MainActor.run { quickAddTitle = "" }
+        }
+    }
+
+    private func deleteTask(_ t: AtelierTask) {
+        Task { try? await store.deleteTask(t) }
     }
 
     private func advance(to next: Feature.Stage) {

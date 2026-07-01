@@ -684,36 +684,7 @@ struct FillKanbanSheet: View {
         saveError = nil
         Task {
             do {
-                // Pass 1: create every task, recording its draft ref → real id so
-                // we can wire dependencies once all ids exist.
-                var refToId: [String: String] = [:]
-                var created: [(draft: AIAssistant.TaskDraft, task: AtelierTask)] = []
-                for draft in snapshots {
-                    var task = try await store.createTask(
-                        in: project,
-                        title: draft.title,
-                        priority: draft.priority,
-                        workerModel: draft.workerModel
-                    )
-                    if !draft.descriptionMd.isEmpty { task.descriptionMd = draft.descriptionMd }
-                    if !draft.labels.isEmpty { task.labels = draft.labels }
-                    if !draft.descriptionMd.isEmpty || !draft.labels.isEmpty {
-                        try await store.updateTask(task)
-                    }
-                    if let ref = draft.ref { refToId[ref] = task.id }
-                    created.append((draft, task))
-                }
-                // Pass 2: resolve depends_on refs to real ids (drop self-refs and
-                // any ref whose task was removed before persisting).
-                for entry in created where !entry.draft.dependsOnRefs.isEmpty {
-                    let deps = entry.draft.dependsOnRefs
-                        .compactMap { refToId[$0] }
-                        .filter { $0 != entry.task.id }
-                    guard !deps.isEmpty else { continue }
-                    var t = entry.task
-                    t.dependsOn = Array(Set(deps))
-                    try await store.updateTask(t)
-                }
+                try await store.createTasks(fromDrafts: snapshots, in: project)
                 await MainActor.run { onClose() }
             } catch {
                 await MainActor.run {

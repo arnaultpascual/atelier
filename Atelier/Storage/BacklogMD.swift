@@ -52,6 +52,7 @@ enum BacklogMD {
         var budgetUsd: Double?
         var dependsOn: [String]
         var attachments: [String]
+        var featureId: String?
         var testState: AtelierTask.TestState
         var testSummary: String?
         var testIntegrity: AtelierTask.TestIntegrity
@@ -104,6 +105,7 @@ enum BacklogMD {
         let attachments = (pulled.removeValue(forKey: "attachments") as? [Any] ?? []).compactMap { $0 as? String }
 
         let workerModel = pulled.removeValue(forKey: "worker_model") as? String
+        let featureId = pulled.removeValue(forKey: "feature_id") as? String
         let budgetUsd: Double? = {
             let raw = pulled.removeValue(forKey: "budget_usd")
             if let d = raw as? Double { return d }
@@ -132,6 +134,7 @@ enum BacklogMD {
             budgetUsd: budgetUsd,
             dependsOn: dependsOn,
             attachments: attachments,
+            featureId: featureId,
             testState: testState,
             testSummary: testSummary,
             testIntegrity: testIntegrity,
@@ -166,6 +169,9 @@ enum BacklogMD {
         if let m = task.workerModel { fm.append(("worker_model", m)) }
         if let b = task.budgetUsd { fm.append(("budget_usd", b)) }
         fm.append(("depends_on", task.dependsOn))
+        if let featureId = task.featureId, !featureId.isEmpty {
+            fm.append(("feature_id", featureId))
+        }
         if !task.attachments.isEmpty {
             fm.append(("attachments", task.attachments))
         }

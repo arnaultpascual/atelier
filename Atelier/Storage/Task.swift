@@ -20,6 +20,9 @@ struct AtelierTask: Identifiable, Hashable, Sendable {
     var budgetUsd: Double?
     var descriptionMd: String?      // markdown body after the frontmatter
     var attachments: [String]       // relative paths, e.g. ".atelier/attachments/task-001/foo.png"
+    /// The feature this task belongs to (feature-first flow). nil = a loose/project-level task
+    /// (e.g. created via the classic kanban). Persisted as the `feature_id` frontmatter key.
+    var featureId: String? = nil
     /// Strict-TDD gate state — orthogonal to `status` (the kanban column). Persisted
     /// as a DB column + `test_state` frontmatter key. Defaults to `.unknown`.
     var testState: TestState = .unknown
@@ -145,6 +148,7 @@ extension AtelierTask: FetchableRecord, MutablePersistableRecord {
         static let budgetUsd = Column("budgetUsd")
         static let descriptionMd = Column("descriptionMd")
         static let attachments = Column("attachments")
+        static let featureId = Column("featureId")
         static let testState = Column("testState")
         static let testSummary = Column("testSummary")
         static let testIntegrity = Column("testIntegrity")
@@ -174,6 +178,7 @@ extension AtelierTask: FetchableRecord, MutablePersistableRecord {
         budgetUsd = row[Columns.budgetUsd]
         descriptionMd = row[Columns.descriptionMd]
         attachments = Self.decodeStringArray(row[Columns.attachments])
+        featureId = row[Columns.featureId]
         if let raw: String = row[Columns.testState], let s = TestState(rawValue: raw) {
             testState = s
         } else {
@@ -203,6 +208,7 @@ extension AtelierTask: FetchableRecord, MutablePersistableRecord {
         container[Columns.budgetUsd] = budgetUsd
         container[Columns.descriptionMd] = descriptionMd
         container[Columns.attachments] = Self.encodeStringArray(attachments)
+        container[Columns.featureId] = featureId
         container[Columns.testState] = testState.rawValue
         container[Columns.testSummary] = testSummary
         container[Columns.testIntegrity] = testIntegrity.rawValue

@@ -307,6 +307,11 @@ final class AppStore {
         tasks(in: projectId).filter { $0.status == status }
     }
 
+    /// A feature's tasks (feature-first flow), ordered by id for stable display.
+    func tasks(inFeature featureId: String) -> [AtelierTask] {
+        tasksByProject.values.flatMap { $0 }.filter { $0.featureId == featureId }.sorted { $0.id < $1.id }
+    }
+
     func taskByID(_ id: String) -> AtelierTask? {
         tasksByProject.values.flatMap { $0 }.first(where: { $0.id == id })
     }
@@ -327,7 +332,8 @@ final class AppStore {
     func createTask(in project: Project,
                     title: String,
                     priority: AtelierTask.Priority? = nil,
-                    workerModel: String? = nil) async throws -> AtelierTask {
+                    workerModel: String? = nil,
+                    featureId: String? = nil) async throws -> AtelierTask {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         precondition(!trimmed.isEmpty, "Task title must not be empty")
 
@@ -337,7 +343,7 @@ final class AppStore {
         let mdPath = "backlog/tasks/\(filename)"
         let absolutePath = URL(fileURLWithPath: project.path).appendingPathComponent(mdPath).path
 
-        let draft = AtelierTask.newDraft(
+        var mutableDraft = AtelierTask.newDraft(
             id: id,
             projectId: project.id,
             title: trimmed,
@@ -345,6 +351,8 @@ final class AppStore {
             priority: priority,
             workerModel: workerModel ?? project.defaultModel
         )
+        mutableDraft.featureId = featureId
+        let draft = mutableDraft
 
         try BacklogMD.write(task: draft, to: absolutePath)
         try await db.write { db in
@@ -352,6 +360,41 @@ final class AppStore {
             try copy.insert(db)
         }
         return draft
+    }
+
+    /// Persists a batch of `AIAssistant.TaskDraft`s in two passes: create every task (recording each
+    /// draft's ref → real id), then resolve `depends_on` refs to real ids. Shared by Fill Kanban and
+    /// the feature flow's decompose stage. `featureId` stamps every created task (feature-first flow).
+    @discardableResult
+    func createTasks(fromDrafts drafts: [AIAssistant.TaskDraft],
+                     in project: Project,
+                     featureId: String? = nil) async throws -> [AtelierTask] {
+        var refToId: [String: String] = [:]
+        var created: [(draft: AIAssistant.TaskDraft, task: AtelierTask)] = []
+        for draft in drafts {
+            var task = try await createTask(in: project,
+                                            title: draft.title,
+                                            priority: draft.priority,
+                                            workerModel: draft.workerModel,
+                                            featureId: featureId)
+            if !draft.descriptionMd.isEmpty { task.descriptionMd = draft.descriptionMd }
+            if !draft.labels.isEmpty { task.labels = draft.labels }
+            if !draft.descriptionMd.isEmpty || !draft.labels.isEmpty {
+                try await updateTask(task)
+            }
+            if let ref = draft.ref { refToId[ref] = task.id }
+            created.append((draft, task))
+        }
+        for entry in created where !entry.draft.dependsOnRefs.isEmpty {
+            let deps = entry.draft.dependsOnRefs
+                .compactMap { refToId[$0] }
+                .filter { $0 != entry.task.id }
+            guard !deps.isEmpty else { continue }
+            var t = entry.task
+            t.dependsOn = Array(Set(deps))
+            try await updateTask(t)
+        }
+        return created.map(\.task)
     }
 
     /// Re-writes the .md file and updates the DB row.
@@ -473,6 +516,7 @@ final class AppStore {
                     budgetUsd: parsed.budgetUsd,
                     descriptionMd: parsed.body.isEmpty ? nil : parsed.body,
                     attachments: parsed.attachments,
+                    featureId: parsed.featureId,
                     testState: parsed.testState,
                     testSummary: parsed.testSummary,
                     testIntegrity: parsed.testIntegrity,

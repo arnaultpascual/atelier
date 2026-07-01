@@ -23,6 +23,9 @@ enum TaskPhase: Equatable {
 @Observable
 final class AutopilotRun {
     let projectId: String
+    /// When set, the run is scoped to ONE feature: it only builds that feature's tasks, and the
+    /// runner keys it by `featureId` (a feature run and a project run can coexist). nil = project-wide.
+    let featureId: String?
     let batchesRequested: Int
     var status: FeatureBuildRunner.Status = .running
     var currentRound: Int = 0
@@ -57,8 +60,9 @@ final class AutopilotRun {
         costByTask.values.reduce(0, +) + reviewCostByTask.values.reduce(0, +) + synthesisCostUsd
     }
 
-    init(projectId: String, batchesRequested: Int, budgetCapUsd: Double?) {
+    init(projectId: String, featureId: String? = nil, batchesRequested: Int, budgetCapUsd: Double?) {
         self.projectId = projectId
+        self.featureId = featureId
         self.batchesRequested = batchesRequested
         self.budgetCapUsd = budgetCapUsd
     }
@@ -99,37 +103,49 @@ final class FeatureBuildRunner {
 
     // MARK: - Public
 
-    func run(for projectId: String) -> AutopilotRun? { runs[projectId] }
+    /// A run by its scope key (projectId for a project run, featureId for a feature run — the two
+    /// never collide). The feature flow uses `run(forFeature:)`.
+    func run(for scopeId: String) -> AutopilotRun? { runs[scopeId] }
+    func run(forFeature featureId: String) -> AutopilotRun? { runs[featureId] }
 
-    func isActive(projectId: String) -> Bool {
-        guard let r = runs[projectId] else { return false }
+    func isActive(projectId: String) -> Bool { isActive(scopeId: projectId) }
+    func isActive(featureId: String) -> Bool { isActive(scopeId: featureId) }
+    private func isActive(scopeId: String) -> Bool {
+        guard let r = runs[scopeId] else { return false }
         switch r.status {
         case .running, .stopping, .paused: return true
         case .finished, .failed: return false
         }
     }
 
+    /// Starts an autopilot run. Pass `feature` to scope it to that feature's tasks (feature-first
+    /// flow); omit it for a project-wide run (classic kanban). Keyed by `feature?.id ?? project.id`.
     func start(project: Project,
+               feature: Feature? = nil,
                batches: Int,
                budgetCapUsd: Double?,
                store: AppStore,
                spawner: TaskSpawner,
                server: ApprovalServer,
                approvalQueue: ApprovalQueue) {
-        guard !isActive(projectId: project.id) else { return }
+        let scopeId = feature?.id ?? project.id
+        guard !isActive(scopeId: scopeId) else { return }
         let run = AutopilotRun(projectId: project.id,
+                               featureId: feature?.id,
                                batchesRequested: max(1, batches),
                                budgetCapUsd: budgetCapUsd)
         let deps = Deps(project: project, store: store, spawner: spawner, server: server,
                         approvalQueue: approvalQueue, apiKey: APIKeyResolver.resolve())
         run.deps = deps
-        runs[project.id] = run
+        runs[scopeId] = run
         run.loopTask = Task { @MainActor in await self.runLoop(run: run, deps: deps) }
     }
 
     /// Soft stop: no new spawns, let in-flight workers finish. `force` also SIGTERMs live workers.
-    func stop(projectId: String, force: Bool) {
-        guard let run = runs[projectId] else { return }
+    func stop(projectId: String, force: Bool) { stop(scopeId: projectId, force: force) }
+    func stop(featureId: String, force: Bool) { stop(scopeId: featureId, force: force) }
+    private func stop(scopeId: String, force: Bool) {
+        guard let run = runs[scopeId] else { return }
         run.autoResumeTask?.cancel(); run.autoResumeTask = nil   // cancel any pending auto-resume
         if run.status == .running { run.status = .stopping }
         if force, let deps = run.deps {
@@ -137,18 +153,22 @@ final class FeatureBuildRunner {
         }
     }
 
-    /// Drops a finished/failed/paused run so the project's control returns to idle.
-    func clearRun(projectId: String) {
-        guard let run = runs[projectId] else { return }
+    /// Drops a finished/failed/paused run so the scope's control returns to idle.
+    func clearRun(projectId: String) { clearRun(scopeId: projectId) }
+    func clearRun(featureId: String) { clearRun(scopeId: featureId) }
+    private func clearRun(scopeId: String) {
+        guard let run = runs[scopeId] else { return }
         if run.status == .running || run.status == .stopping { return }
         run.autoResumeTask?.cancel(); run.autoResumeTask = nil
-        runs[projectId] = nil
+        runs[scopeId] = nil
     }
 
     /// Resumes a paused run (after a usage limit). Continues on the SAME feature branch:
     /// re-integrates anything left in review, then builds the remaining tasks.
-    func resume(projectId: String) {
-        guard let run = runs[projectId], case .paused = run.status, let deps = run.deps else { return }
+    func resume(projectId: String) { resume(scopeId: projectId) }
+    func resume(featureId: String) { resume(scopeId: featureId) }
+    private func resume(scopeId: String) {
+        guard let run = runs[scopeId], case .paused = run.status, let deps = run.deps else { return }
         run.autoResumeTask?.cancel(); run.autoResumeTask = nil   // manual (or auto) resume takes over
         run.status = .running
         run.lastError = nil
@@ -177,16 +197,27 @@ final class FeatureBuildRunner {
                 }
                 // Everything merges into a fresh feature branch off the current one, so your
                 // original branch is never touched. We present this branch at the end to review.
-                let integration = "atelier/autopilot-\(Self.timestamp())"
+                // A feature run names the branch after the feature; a project run stays generic.
+                let integration: String
+                if let fid = run.featureId, let feature = deps.store.featureByID(fid) {
+                    integration = "atelier/feature-\(BacklogMD.slugify(feature.name))-\(Self.timestamp())"
+                } else {
+                    integration = "atelier/autopilot-\(Self.timestamp())"
+                }
                 try await GitService.createIntegrationBranch(projectPath: deps.project.path, branch: integration)
                 run.integrationBranch = integration
                 run.originalBase = base        // remember where we branched from
                 run.baseBranch = integration   // task worktrees branch off this; merges land here
+                // Link the integration branch back to the feature so the flow's finish stage finds it.
+                if let fid = run.featureId, var feature = deps.store.featureByID(fid) {
+                    feature.integrationBranch = integration
+                    try? await deps.store.updateFeature(feature)
+                }
             } else {
                 // Resume (e.g. after a usage-limit pause): the feature branch already exists.
                 // Re-check it out, then integrate any tasks left in review before building more.
                 try await GitService.checkoutBranch(projectPath: deps.project.path, branch: run.integrationBranch)
-                for t in deps.store.tasks(in: deps.project.id, status: .review)
+                for t in scopedTasks(run, deps).filter({ $0.status == .review })
                         .sorted(by: { integrationOrder($0) < integrationOrder($1) }) {
                     if run.status != .running { break }
                     run.readyToMerge.remove(t.id)
@@ -207,7 +238,7 @@ final class FeatureBuildRunner {
             if safety > maxRoundsCeiling { finish(run, .failed("Round ceiling reached.")); return }
             if overBudget(run) { finish(run, .failed(budgetMessage(run))); return }
 
-            let allTasks = deps.store.tasks(in: deps.project.id)
+            let allTasks = scopedTasks(run, deps)
             let todo = allTasks.filter { $0.status == .toDo }
             let wave = ExecutionPlanner.runnableNow(tasks: todo, allTasks: allTasks)
             if wave.isEmpty { break }   // nothing runnable now → natural finish (deadlock or done)
@@ -624,7 +655,7 @@ final class FeatureBuildRunner {
         // reached .done (it blocked or didn't finish) — so the dependency graph correctly never ran
         // them. Surfaced in the deliverable so a stalled wait isn't silently invisible.
         let runScope = Set(run.taskPhases.keys)
-        let allTasks = deps.store.tasks(in: deps.project.id)
+        let allTasks = scopedTasks(run, deps)
         let unfinishedScoped = Set(allTasks.filter { runScope.contains($0.id) && $0.status != .done }.map(\.id))
         let stalled = allTasks.filter { t in
             (t.status == .toDo || t.status == .inProgress) && !runScope.contains(t.id)
@@ -705,6 +736,11 @@ final class FeatureBuildRunner {
         run.synthesisCostUsd += deliverable.costUsd
         let url = FeatureDeliverableStore.persist(deliverable, projectPath: deps.project.path)
         run.deliverablePath = url.path
+        // Link the deliverable back to the feature so the flow's finish stage can surface it.
+        if let fid = run.featureId, var feature = deps.store.featureByID(fid) {
+            feature.deliverablePath = url.path
+            try? await deps.store.updateFeature(feature)
+        }
         logger.notice("feature synthesis wrote \(url.lastPathComponent, privacy: .public)")
     }
 
@@ -764,6 +800,12 @@ final class FeatureBuildRunner {
 
     private func modeProfile(_ deps: Deps) -> ProjectProfile {
         ProjectProfile.find(id: deps.project.profileId) ?? .generic
+    }
+
+    /// Tasks in this run's scope: the feature's tasks for a feature run, else all project tasks.
+    private func scopedTasks(_ run: AutopilotRun, _ deps: Deps) -> [AtelierTask] {
+        if let fid = run.featureId { return deps.store.tasks(inFeature: fid) }
+        return deps.store.tasks(in: deps.project.id)
     }
 
     /// Updates a task's TDD state / summary / status in one write, off a fresh copy so it never
@@ -989,7 +1031,7 @@ final class FeatureBuildRunner {
         let reason = "Usage limit reached while building “\(task.title)”. Resume once your limit resets."
         run.status = .paused(reason)
         run.lastError = reason
-        scheduleAutoResume(run: run, projectId: deps.project.id)
+        scheduleAutoResume(run: run, scopeId: run.featureId ?? deps.project.id)
     }
 
     /// Schedules ONE automatic resume after a usage-limit pause — only when we can determine the
@@ -997,7 +1039,7 @@ final class FeatureBuildRunner {
     /// margin, since relaunching exactly on the reset minute often still trips the limit). If the
     /// reset time is unknown, or this run already used its one auto-resume, we leave it for the
     /// manual Resume button. `resetsAt` is an absolute Date (ISO-8601 with offset) — timezone-safe.
-    private func scheduleAutoResume(run: AutopilotRun, projectId: String) {
+    private func scheduleAutoResume(run: AutopilotRun, scopeId: String) {
         guard !run.didAutoResume else { return }
         run.didAutoResume = true
         run.autoResumeTask?.cancel()
@@ -1006,14 +1048,14 @@ final class FeatureBuildRunner {
             guard let resetsAt = await Self.nextUsageResetDate() else { return }   // unknown → manual only
             let resumeAt = resetsAt.addingTimeInterval(300)   // +5 min margin
             // Reflect the plan in the paused pill so the user knows it'll come back on its own.
-            if case .paused = run.status, runs[projectId] === run {
+            if case .paused = run.status, runs[scopeId] === run {
                 let f = DateFormatter(); f.timeStyle = .short; f.dateStyle = .none   // user's local tz
                 run.status = .paused("Usage limit — auto-resume around \(f.string(from: resumeAt)) (or Resume now).")
             }
             let delay = max(resumeAt.timeIntervalSinceNow, 30)   // at least a short beat
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard !Task.isCancelled, runs[projectId] === run, case .paused = run.status else { return }
-            resume(projectId: projectId)
+            guard !Task.isCancelled, runs[scopeId] === run, case .paused = run.status else { return }
+            resume(scopeId: scopeId)
         }
     }
 
