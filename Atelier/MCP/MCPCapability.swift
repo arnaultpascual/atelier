@@ -2,15 +2,15 @@
 import Foundation
 
 /// App-level kill-switch for the MCP capability layer. This is a rollout guard,
-/// not a user feature toggle: OFF through Phases 1–3, flipped ON in Phase 4 once
-/// proven. When OFF, no worker gets `--mcp-config` and the pure file+git contract
-/// is unchanged.
+/// not a user feature toggle. Default-ON as of Phase 4 (proven across phases);
+/// set `atelier.mcpCapabilityEnabled` = false in UserDefaults to disable. When
+/// off, no worker gets `--mcp-config` and the pure file+git contract is unchanged.
 enum MCPCapability {
     static let defaultsKey = "atelier.mcpCapabilityEnabled"
 
-    /// Defaults to `false` (unset → off). Set the `atelier.mcpCapabilityEnabled`
-    /// UserDefaults bool to true to enable during development/testing.
+    /// Defaults to `true` (unset → on). Set the `atelier.mcpCapabilityEnabled`
+    /// UserDefaults bool to false to hard-disable the whole capability layer.
     static var isEnabled: Bool {
-        UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? false
+        UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true
     }
 }

@@ -48,6 +48,18 @@ final class AppStore {
         taskProgress[taskId] = nil
     }
 
+    /// Ephemeral block reasons reported via `task_signal_blocked` (the status flip
+    /// to .blocked is the durable signal; the reason is transient, no migration).
+    private(set) var taskBlockedReason: [String: String] = [:]
+    func setBlockedReason(taskId: String, reason: String) { taskBlockedReason[taskId] = reason }
+    func clearBlockedReason(taskId: String) { taskBlockedReason[taskId] = nil }
+
+    /// Bumped whenever the MCP bridge writes a feature's living brief.md, so an
+    /// open PreparePromptView preview reloads live (keyed by chat-room id). Not
+    /// persisted — purely a UI refresh signal.
+    private(set) var briefRevision: [String: Int] = [:]
+    func bumpBriefRevision(roomId: String) { briefRevision[roomId, default: 0] += 1 }
+
     private var observationTask: Task<Void, Never>?
 
     init() {

@@ -158,4 +158,108 @@ final class MCPServerCoreTests: XCTestCase {
         XCTAssertEqual(r?.result?["protocolVersion"]?.stringValue, MCPServerCore.defaultProtocolVersion)
         XCTAssertNotNil(r?.result?["capabilities"]?["prompts"])
     }
+
+    // MARK: Phase 2/3 tools
+
+    private func ackBridge(_ msg: String = "ok") -> FakeBridge {
+        FakeBridge { r in .success(id: r.id, result: .object(["message": .string(msg)])) }
+    }
+
+    func testToolsListContainsFullSurfaceAndNoDots() async {
+        let names = await core().handle(req(30, "tools/list"), bridge: alwaysOK())
+            .flatMap { $0.result?["tools"]?.arrayValue }?.compactMap { $0["name"]?.stringValue } ?? []
+        for expected in ["brief_add_requirement", "brief_resolve_open_question", "spec_record_finding",
+                         "task_update_status", "task_get_dependencies", "wave_mark_done",
+                         "plan_next_wave", "coverage_get", "coverage_uncovered", "test_report_run", "review_request"] {
+            XCTAssertTrue(names.contains(expected), "missing \(expected)")
+        }
+        XCTAssertFalse(names.contains { $0.contains(".") })
+    }
+
+    func testBriefMutationForwardsArgsAndAcks() async {
+        let bridge = ackBridge("Requirement added.")
+        let params: JSONValue = .object(["name": .string("brief_add_requirement"),
+                                         "arguments": .object(["text": .string("be fast"), "priority": .string("high")])])
+        let r = await core().handle(req(31, "tools/call", params), bridge: bridge)
+        XCTAssertEqual(r?.result?["isError"]?.boolValue, false)
+        let sent = await bridge.lastRequest()
+        XCTAssertEqual(sent?.op, "brief_add_requirement")
+        XCTAssertEqual(sent?.featureId, "F1")
+        XCTAssertEqual(sent?.args["text"]?.stringValue, "be fast")
+        XCTAssertEqual(sent?.args["priority"]?.stringValue, "high")
+    }
+
+    func testSpecRecordFindingForwards() async {
+        let bridge = ackBridge()
+        let params: JSONValue = .object(["name": .string("spec_record_finding"),
+                                         "arguments": .object(["finding": .string("API lacks X"), "workaround": .string("poll")])])
+        _ = await core().handle(req(32, "tools/call", params), bridge: bridge)
+        let sent = await bridge.lastRequest()
+        XCTAssertEqual(sent?.op, "spec_record_finding")
+        XCTAssertEqual(sent?.args["finding"]?.stringValue, "API lacks X")
+    }
+
+    func testTaskUpdateStatusFallsBackToContextTask() async {
+        let bridge = ackBridge()
+        let params: JSONValue = .object(["name": .string("task_update_status"),
+                                         "arguments": .object(["status": .string("Done")])])
+        _ = await core().handle(req(33, "tools/call", params), bridge: bridge)
+        let sent = await bridge.lastRequest()
+        XCTAssertEqual(sent?.op, "task_update_status")
+        XCTAssertEqual(sent?.taskId, "T1")   // from context
+        XCTAssertEqual(sent?.args["status"]?.stringValue, "Done")
+    }
+
+    func testQueryToolRendersAppText() async {
+        let bridge = FakeBridge { r in .success(id: r.id, result: .object(["text": .string("Coverage 72% vs 90% (gap 18) [swift]")])) }
+        let params: JSONValue = .object(["name": .string("coverage_get"), "arguments": .object([:])])
+        let r = await core().handle(req(34, "tools/call", params), bridge: bridge)
+        let text = r?.result?["content"]?.arrayValue?.first?["text"]?.stringValue
+        XCTAssertEqual(text, "Coverage 72% vs 90% (gap 18) [swift]")
+        let sent = await bridge.lastRequest()
+        XCTAssertEqual(sent?.op, "coverage_get")
+    }
+
+    func testForwardingToolWithoutFeatureIsToolError() async {
+        let bridge = ackBridge()
+        let params: JSONValue = .object(["name": .string("brief_add_requirement"),
+                                         "arguments": .object(["text": .string("x")])])
+        let r = await core(feature: nil).handle(req(35, "tools/call", params), bridge: bridge)
+        XCTAssertEqual(r?.result?["isError"]?.boolValue, true)
+        let count = await bridge.count
+        XCTAssertEqual(count, 0)   // never hit the bridge without a feature
+    }
+
+    func testBridgeFailureOnMutationIsToolErrorNotRPCError() async {
+        let bridge = FakeBridge { r in .failure(id: r.id, error: "app not loaded") }
+        let params: JSONValue = .object(["name": .string("task_update_status"),
+                                         "arguments": .object(["status": .string("Done")])])
+        let r = await core().handle(req(36, "tools/call", params), bridge: bridge)
+        XCTAssertEqual(r?.result?["isError"]?.boolValue, true)
+        XCTAssertNil(r?.error)
+    }
+
+    // MARK: Prompts (Phase 4)
+
+    func testPromptsListHasFourNoDotNames() async {
+        let names = await core().handle(req(40, "prompts/list"), bridge: alwaysOK())
+            .flatMap { $0.result?["prompts"]?.arrayValue }?.compactMap { $0["name"]?.stringValue } ?? []
+        XCTAssertEqual(Set(names), ["atelier_decompose", "atelier_refine_brief", "atelier_review", "atelier_synthesize_feature"])
+        XCTAssertFalse(names.contains { $0.contains(".") })
+    }
+
+    func testPromptsGetRendersArgsAndDefaults() async {
+        let params: JSONValue = .object(["name": .string("atelier_review"),
+                                         "arguments": .object(["task_title": .string("Add login")])])
+        let r = await core().handle(req(41, "prompts/get", params), bridge: alwaysOK())
+        let text = r?.result?["messages"]?.arrayValue?.first?["content"]?["text"]?.stringValue ?? ""
+        XCTAssertTrue(text.contains("Add login"))       // provided arg
+        XCTAssertTrue(text.contains("base branch main")) // default substituted
+        XCTAssertFalse(text.contains("{{"))              // no unsubstituted placeholders
+    }
+
+    func testPromptsGetUnknownIsInvalidParams() async {
+        let r = await core().handle(req(42, "prompts/get", .object(["name": .string("nope")])), bridge: alwaysOK())
+        XCTAssertEqual(r?.error?.code, -32602)
+    }
 }

@@ -4,6 +4,36 @@ All notable changes to Atelier are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **MCP capability layer** — a local stdio MCP server (`AtelierMCPServer`) is handed to every
+  feature-scoped worker via `--mcp-config`, giving Claude a typed API + on-demand context + a
+  real-time back-channel to Atelier's domain, on top of the file+git contract (which stays the
+  source of truth and fallback). It bridges to the running app over a Unix socket
+  (`AtelierBridgeListener`), so the app remains the single GRDB writer on `@MainActor`. Capability
+  only — the approval flow (hook / queue / worktree isolation) is untouched; the app auto-accepts
+  its own first-party `mcp__atelier__*` tools so they never hit the inbox.
+  - **Live build progress** — `task_report_progress` drives a live % on the kanban card (ephemeral,
+    no persistence).
+  - **Structured brief building** — `brief_set_overview` / `brief_add_requirement` /
+    `brief_add_acceptance_criterion` / `brief_add_open_question` / `brief_resolve_open_question` /
+    `brief_record_decision` / `brief_attach_reference` / `brief_append_section` serialize into the
+    canonical living `brief.md`; the Prepare-Prompt preview refreshes live.
+  - **Always-referenceable spec** — `atelier://feature/{id}/spec` (and `/brief`) expose the living
+    brief as an MCP resource; `spec_record_finding` lets a worker record a discovered constraint +
+    workaround so other feature workers and reviewers see it.
+  - **Data-driven TDD** — `coverage_get` / `coverage_uncovered` report coverage vs the soft 90%
+    target across **swift, node, python and dotnet** (a multi-format Cobertura / LCOV / json-summary
+    parser); `test_report_run` records a structured run; `task_update_status`, `task_signal_blocked`,
+    `task_get_dependencies`, `plan_next_wave`, `wave_mark_done`, `review_request` round out the surface.
+  - **Server-served prompts** — `atelier_decompose` / `atelier_refine_brief` / `atelier_review` /
+    `atelier_synthesize_feature` are discoverable via `prompts/list` + `prompts/get`.
+  - Gated by an app-level kill-switch (`atelier.mcpCapabilityEnabled`, default on; set false to
+    disable). A missing/unreachable server degrades to the pure file+git contract. New `AtelierTests`
+    unit-test target added. Design + Phase 0 verification in `docs/mcp-capability.md`.
+
 ## [1.0.0-alpha.5] — 2026-07-01
 
 Two headline features: a **.NET (C#) mode**, and a **feature-centric guided flow** that walks a
