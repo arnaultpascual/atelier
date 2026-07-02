@@ -48,6 +48,14 @@ enum ProjectProfileDetector {
                 let devDeps = (obj["devDependencies"] as? [String: Any]) ?? [:]
                 let all = deps.merging(devDeps) { l, _ in l }
                 let frontendKeys = ["next", "react", "vue", "svelte", "nuxt", "astro", "remix", "@angular/core"]
+                // Order inside the fork is load-bearing: next → react+vite → other frontend → node.
+                if all["next"] != nil {
+                    return (profile(id: "web-nextjs"), ["package.json (next)"])
+                }
+                if (all["react"] != nil || all["react-dom"] != nil)
+                    && (all["vite"] != nil || all["@vitejs/plugin-react"] != nil) {
+                    return (profile(id: "react-vite"), ["package.json (react+vite)"])
+                }
                 if frontendKeys.contains(where: { all[$0] != nil }) {
                     return (profile(id: "web-nextjs"), ["package.json (frontend)"])
                 }

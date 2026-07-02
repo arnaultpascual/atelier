@@ -42,6 +42,36 @@ final class ProjectProfileDetectorTests: XCTestCase {
         XCTAssertEqual(try detectID(["manage.py": "x", "requirements.txt": "django\nfastapi\n"]), "django")
     }
 
+    // MARK: JS/TS fork (next → react-vite → other frontend → node)
+
+    private func pkg(_ deps: String) -> [String: String] { ["package.json": "{\"dependencies\": {\(deps)}}"] }
+
+    func testNextWinsOverReactVite() throws {
+        // Next projects also have react + sometimes vite; next must win.
+        XCTAssertEqual(try detectID(pkg("\"next\":\"14\",\"react\":\"18\",\"vite\":\"5\"")), "web-nextjs")
+    }
+    func testReactViteDetected() throws {
+        XCTAssertEqual(try detectID(pkg("\"react\":\"18\",\"react-dom\":\"18\",\"vite\":\"5\"")), "react-vite")
+    }
+    func testReactWithoutViteFallsToWebNext() throws {
+        // CRA/webpack React (no vite) → the general frontend mode, not react-vite.
+        XCTAssertEqual(try detectID(pkg("\"react\":\"18\",\"react-dom\":\"18\"")), "web-nextjs")
+    }
+    func testNodeBackendWhenNoFrontend() throws {
+        XCTAssertEqual(try detectID(pkg("\"express\":\"4\"")), "node-backend")
+    }
+    func testViteWithoutReactIsNodeBackend() throws {
+        // A vite tool project without react shouldn't be react-vite.
+        XCTAssertEqual(try detectID(pkg("\"vite\":\"5\"")), "node-backend")
+    }
+    func testJsModesHaveNpmTestGateAndCoverageSetup() {
+        for id in ["web-nextjs", "react-vite", "node-backend"] {
+            let p = ProjectProfile.find(id: id)!
+            XCTAssertEqual(p.build.fastTestCommands.first?.command, "npm test", "\(id) gate")
+            XCTAssertNotNil(p.build.coverageSetup, "\(id) coverageSetup")
+        }
+    }
+
     func testPythonFamilyHasPytestGateAndCoverage() {
         for id in ["django", "fastapi", "python"] {
             let p = ProjectProfile.find(id: id)!

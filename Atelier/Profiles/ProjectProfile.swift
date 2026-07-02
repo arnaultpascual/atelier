@@ -147,6 +147,34 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
             - Commit ONLY the dependency/config change.
             """))
 
+    // Shared JS/TS toolchain (node-backend + web-nextjs + react-vite). The gate runs the
+    // project's own `npm test` script (portable across vitest/jest/etc); coverage is wire-able.
+    private static let jsRules: [PermissionRule] = [
+        .init(tool: "Bash", pattern: "re:^(pnpm|yarn|npm)( run)? (lint|typecheck|type-check|build|test|coverage|install|ci)( |$)", behavior: .allow, reason: "Standard JS package scripts", scope: .profile),
+        .init(tool: "Bash", pattern: "re:^npx (tsc|vitest|jest|c8|nyc)( |$)", behavior: .allow, reason: "JS test/coverage/type tools", scope: .profile),
+        .init(tool: "Bash", pattern: "re:^node (--version|--test)( |$)", behavior: .allow, reason: "Node runtime", scope: .profile),
+    ]
+    private static let jsBuild = BuildConfig(
+        buildCommand: nil,
+        testCommands: [.init(id: "unit", label: "npm test", command: "npm test", tier: .fast, requiresDevice: false)],
+        testScaffoldingHint: "The gate runs `npm test` — ensure package.json has a real `test` script (e.g. \"vitest run\" or \"jest\") and that unit tests exist (write the failing test FIRST). Install deps first (npm/pnpm/yarn install) so the runner + node_modules are present; the npm default placeholder test script (exit 1) fails the gate until replaced.",
+        testDiscoveryGlobs: ["**/*.test.ts", "**/*.test.tsx", "**/*.test.js", "**/*.spec.ts", "**/*.spec.js", "**/__tests__/**"],
+        requiredTools: [
+            .init(id: "node", label: "Node.js", probe: .executable("node"),
+                  installHint: "Install Node.js (node must be runnable) — the gate runs `npm test`.", required: true),
+        ],
+        coverageSetup: .init(
+            // No coverageCommand: JS test invocation is too project-specific to auto-run at dossier
+            // time; coverage_get reads whatever report the worktree has. coverageSetup wires one.
+            probeFiles: ["vitest.config.ts", "vitest.config.js", "vitest.config.mts", "vite.config.ts", "vite.config.js", "jest.config.js", "jest.config.ts", "package.json"],
+            markers: ["@vitest/coverage-v8", "coverage-v8", "collectcoverage", "--coverage", "\"coverage\""],
+            toolName: "Vitest coverage",
+            instructions: """
+            Wire test coverage so a report is produced under coverage/ (lcov.info + coverage-summary.json). Do this and NOTHING else — no app/test changes.
+            - Prefer Vitest: add @vitest/coverage-v8 as a devDependency and configure `test.coverage` with reporter ['lcov','json-summary'] in the vite/vitest config; add a `coverage` script running the test runner with --coverage. For Jest projects, enable collectCoverage with coverageReporters ['lcovonly','json-summary'] instead.
+            - Verify the coverage report files (coverage/lcov.info and/or coverage/coverage-summary.json) are produced. Commit ONLY the config / devDependency change.
+            """))
+
     static let catalog: [ProjectProfile] = [
         .init(
             id: "swift-apple",
@@ -167,11 +195,19 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
             iconSystemName: "globe",
             defaultModel: "claude-sonnet-4-6",
             suggestedLabels: ["frontend", "next", "react"],
-            description: "package.json declares `next`, `react`, or `react-dom`.",
-            defaultRules: baseReadOnlyRules + [
-                .init(tool: "Bash", pattern: "re:^(pnpm|yarn|npm) (run )?(lint|typecheck|build|test)", behavior: .allow, reason: "Standard npm scripts", scope: .profile),
-                .init(tool: "Bash", pattern: "re:^npx tsc( |$)", behavior: .allow, reason: "TypeScript type-check", scope: .profile),
-            ]
+            description: "package.json declares `next` (or a non-Vite React/Vue/Svelte/etc. frontend).",
+            defaultRules: baseReadOnlyRules + jsRules,
+            build: jsBuild
+        ),
+        .init(
+            id: "react-vite",
+            name: "React (Vite)",
+            iconSystemName: "atom",
+            defaultModel: "claude-sonnet-4-6",
+            suggestedLabels: ["frontend", "react", "vite", "typescript"],
+            description: "React + TypeScript on Vite — package.json has react + vite and NOT next.",
+            defaultRules: baseReadOnlyRules + jsRules,
+            build: jsBuild
         ),
         .init(
             id: "node-backend",
@@ -180,10 +216,8 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
             defaultModel: "claude-sonnet-4-6",
             suggestedLabels: ["backend", "node", "api"],
             description: "package.json without a frontend framework — Express/Fastify/etc.",
-            defaultRules: baseReadOnlyRules + [
-                .init(tool: "Bash", pattern: "re:^(pnpm|yarn|npm) (run )?(lint|typecheck|build|test)", behavior: .allow, reason: "Standard npm scripts", scope: .profile),
-                .init(tool: "Bash", pattern: "re:^node --version$", behavior: .allow, reason: "Node version check", scope: .profile),
-            ]
+            defaultRules: baseReadOnlyRules + jsRules,
+            build: jsBuild
         ),
         .init(
             id: "django",
