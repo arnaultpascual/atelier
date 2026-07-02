@@ -33,10 +33,13 @@ struct CoverageReport: Equatable {
     // MARK: Discovery
 
     static let reportFileNames = [
-        "coverage.cobertura.xml", "cobertura-coverage.xml", "coverage.xml",  // cobertura
-        "lcov.info",                                                          // lcov
-        "coverage-summary.json",                                             // json-summary
+        "coverage.cobertura.xml", "cobertura-coverage.xml", "coverage.xml",  // cobertura (dotnet, python coverage.py)
+        "jacoco.xml", "jacocotestreport.xml",                                // jacoco (android / jvm)
+        "lcov.info",                                                          // lcov (node, swift llvm)
+        "coverage-summary.json",                                             // json-summary (node c8/nyc)
     ]
+    // NB: ".build" (SwiftPM) is pruned but "build" is NOT — Android/Gradle JaCoCo
+    // reports live under build/reports/jacoco/…, which must remain discoverable.
     private static let prunedDirs: Set<String> = ["bin", "obj", "node_modules", ".git", ".build", "DerivedData"]
 
     /// Finds the newest known coverage report under `dir` and parses it.
@@ -49,8 +52,16 @@ struct CoverageReport: Equatable {
         guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
         let name = (path as NSString).lastPathComponent.lowercased()
         if name.hasSuffix(".json") { return parseJsonSummary(text) }
-        if name.hasSuffix(".xml") { return parseCobertura(text) }
+        if name.hasSuffix(".xml") { return parseXML(text) }
         return parseLcov(text)   // lcov.info / *.info
+    }
+
+    /// Disambiguate the two XML dialects we support: Cobertura carries a
+    /// `line-rate=` attribute; JaCoCo uses `<counter type="LINE" …>` elements.
+    static func parseXML(_ xml: String) -> CoverageReport? {
+        if xml.contains("line-rate=") { return parseCobertura(xml) }
+        if xml.contains("type=\"LINE\"") { return parseJacoco(xml) }
+        return parseCobertura(xml)   // best-effort
     }
 
     private static func newestReportFile(in dir: String) -> String? {
@@ -92,6 +103,39 @@ struct CoverageReport: Equatable {
             }
         }
         return CoverageReport(lineRate: clamp(overall), files: files)
+    }
+
+    /// JaCoCo XML (Android / JVM). Overall + per-file line coverage are derived
+    /// from each `<sourcefile>`'s `<counter type="LINE" missed=.. covered=..>`,
+    /// summed for the total (deterministic — no reliance on which root counter
+    /// comes first). Attribute order is tolerated.
+    static func parseJacoco(_ xml: String) -> CoverageReport? {
+        var files: [FileCoverage] = []
+        var totMissed = 0, totCovered = 0
+        guard let sfRe = try? NSRegularExpression(
+            pattern: #"<sourcefile\b[^>]*?name="([^"]+)"[^>]*>(.*?)</sourcefile>"#,
+            options: [.dotMatchesLineSeparators]) else { return nil }
+        let ns = xml as NSString
+        for m in sfRe.matches(in: xml, range: NSRange(location: 0, length: ns.length)) {
+            let name = ns.substring(with: m.range(at: 1))
+            let body = ns.substring(with: m.range(at: 2))
+            guard let (miss, cov) = jacocoLineCounter(body) else { continue }
+            totMissed += miss; totCovered += cov
+            let denom = miss + cov
+            if denom > 0 { files.append(FileCoverage(path: name, rate: clamp(Double(cov) / Double(denom)))) }
+        }
+        let denom = totMissed + totCovered
+        guard denom > 0 else { return nil }
+        return CoverageReport(lineRate: clamp(Double(totCovered) / Double(denom)), files: files)
+    }
+
+    /// Extracts (missed, covered) from a JaCoCo `<counter type="LINE" …/>` inside
+    /// the given fragment, tolerant of attribute order.
+    private static func jacocoLineCounter(_ fragment: String) -> (missed: Int, covered: Int)? {
+        guard let tag = firstString(in: fragment, pattern: #"(<counter\b[^>]*type="LINE"[^>]*/>)"#) else { return nil }
+        guard let missed = firstDouble(in: tag, pattern: #"missed="([0-9]+)""#).map({ Int($0) }),
+              let covered = firstDouble(in: tag, pattern: #"covered="([0-9]+)""#).map({ Int($0) }) else { return nil }
+        return (missed, covered)
     }
 
     static func parseLcov(_ text: String) -> CoverageReport? {

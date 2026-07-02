@@ -25,8 +25,8 @@ All notable changes to Atelier are documented here. The format is based on
     brief as an MCP resource; `spec_record_finding` lets a worker record a discovered constraint +
     workaround so other feature workers and reviewers see it.
   - **Data-driven TDD** — `coverage_get` / `coverage_uncovered` report coverage vs the soft 90%
-    target across **swift, node, python and dotnet** (a multi-format Cobertura / LCOV / json-summary
-    parser); `test_report_run` records a structured run; `task_update_status`, `task_signal_blocked`,
+    target across **swift, node, python, dotnet and android** (a multi-format Cobertura / LCOV /
+    json-summary / JaCoCo parser); `test_report_run` records a structured run; `task_update_status`, `task_signal_blocked`,
     `task_get_dependencies`, `plan_next_wave`, `wave_mark_done`, `review_request` round out the surface.
   - **Server-served prompts** — `atelier_decompose` / `atelier_refine_brief` / `atelier_review` /
     `atelier_synthesize_feature` are discoverable via `prompts/list` + `prompts/get`.

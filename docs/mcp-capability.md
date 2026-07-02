@@ -190,7 +190,7 @@ This keeps guardrail §2.1 ("capability only, never permissions") true: we never
 
 - **P1 ✅** — `AtelierMCPServer` (MCP over stdio) + `AtelierBridgeListener` + `task_report_progress` (live ephemeral kanban %) + `atelier://feature/{id}/spec`|`brief`. `featureId`/`taskId` threaded; `AtelierTests` added; E2E proven; zero migrations.
 - **P2 ✅** — `brief_*` tools + `spec_record_finding` (D1) via the `BriefDocument` canonical-section model → app-side writes to `brief.md` + live `PreparePromptView` refresh (`AppStore.briefRevision`). MCP wired into the brief-stage **chat** spawn (`ChatSpawner` + `PreparePromptView.featureId`).
-- **P3 ✅** — `coverage_get`/`coverage_uncovered` via a multi-format `CoverageReport` parser (Cobertura/LCOV/json-summary → swift/node/python/dotnet, soft 90% for all modes, D3); `test_report_run`, `task_update_status`, `task_signal_blocked`, `task_get_dependencies`, `plan_next_wave`, `wave_mark_done`, `review_request` — all fresh-read-then-write through `AppStore` on `@MainActor`.
+- **P3 ✅** — `coverage_get`/`coverage_uncovered` via a multi-format `CoverageReport` parser (Cobertura/LCOV/json-summary/JaCoCo → swift/node/python/dotnet/android, soft 90% for all modes, D3); `test_report_run`, `task_update_status`, `task_signal_blocked`, `task_get_dependencies`, `plan_next_wave`, `wave_mark_done`, `review_request` — all fresh-read-then-write through `AppStore` on `@MainActor`.
 - **P4 ✅** — server-served prompts (`atelier_decompose`/`atelier_refine_brief`/`atelier_review`/`atelier_synthesize_feature`) via `prompts/list`+`prompts/get`; kill-switch **default-ON**; CHANGELOG entry.
 
 ### Naming (tools/prompts use underscores)

@@ -59,6 +59,46 @@ final class CoverageReportTests: XCTestCase {
         XCTAssertEqual(r?.belowTarget(90).map { $0.path }, ["/repo/x.ts"])
     }
 
+    func testParseJacocoOverallAndPerFile() {
+        let xml = """
+        <?xml version="1.0"?>
+        <report name="app">
+          <package name="com/x">
+            <sourcefile name="A.kt">
+              <counter type="INSTRUCTION" missed="10" covered="90"/>
+              <counter type="LINE" missed="1" covered="9"/>
+            </sourcefile>
+            <sourcefile name="B.kt">
+              <counter type="LINE" missed="8" covered="2"/>
+            </sourcefile>
+          </package>
+          <counter type="LINE" missed="9" covered="11"/>
+        </report>
+        """
+        let r = CoverageReport.parseJacoco(xml)
+        XCTAssertNotNil(r)
+        XCTAssertEqual(r?.percent, 55)          // covered 11 / found 20
+        XCTAssertEqual(r?.files.count, 2)
+        XCTAssertEqual(r?.files.first { $0.path == "A.kt" }?.rate, 0.9)
+        XCTAssertEqual(r?.belowTarget(90).map { $0.path }, ["B.kt"])  // A is 90% (not below); B is 20%
+    }
+
+    func testParseXMLRoutesJacocoVsCobertura() {
+        XCTAssertEqual(CoverageReport.parseXML(#"<coverage line-rate="0.42"></coverage>"#)?.percent, 42)
+        let jacoco = #"<report><sourcefile name="A"><counter type="LINE" missed="1" covered="1"/></sourcefile></report>"#
+        XCTAssertEqual(CoverageReport.parseXML(jacoco)?.percent, 50)
+    }
+
+    func testFindPicksJacocoUnderGradleBuildDir() throws {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("app-\(UUID().uuidString)")
+        let reportDir = base.appendingPathComponent("build/reports/jacoco/test")   // "build" is NOT pruned
+        try FileManager.default.createDirectory(at: reportDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let jacoco = #"<report><sourcefile name="A.kt"><counter type="LINE" missed="1" covered="3"/></sourcefile></report>"#
+        try jacoco.write(to: reportDir.appendingPathComponent("jacocoTestReport.xml"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(CoverageReport.find(in: base.path)?.percent, 75)
+    }
+
     func testMalformedReturnsNil() {
         XCTAssertNil(CoverageReport.parseCobertura("<coverage>no rate</coverage>"))
         XCTAssertNil(CoverageReport.parseLcov("garbage"))
