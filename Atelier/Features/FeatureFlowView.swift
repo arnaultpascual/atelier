@@ -20,6 +20,10 @@ struct FeatureFlowView: View {
 
     @State private var viewedStage: Feature.Stage
     @State private var toolchain: ToolchainChecker.Report?
+    // Coverage tooling enablement (prerequisites): detect + optionally wire.
+    @State private var coverageStatus: CoverageEnablement.Status?
+    @State private var wiringCoverage = false
+    @State private var coverageNote: String?
     @State private var advancing = false
     // ③ Tasks
     @State private var decomposing = false
@@ -65,6 +69,7 @@ struct FeatureFlowView: View {
         .background(Color.atelierBackground)
         .task(id: viewedStage) {
             await loadToolchainIfNeeded()
+            await loadCoverageStatus()
             await ensureBriefRoomIfNeeded()
         }
         .task(id: deliverableLoadKey) { loadDeliverable() }
@@ -185,7 +190,31 @@ struct FeatureFlowView: View {
                     CalloutBanner(.info, "Toolchain ready — the build can run this mode's tests.")
                 }
             }
+            coverageCallout
             advanceBar(primaryTitle: ready ? "Continue to Brief" : "Continue anyway")
+        }
+    }
+
+    /// Coverage-tooling enablement: when the mode supports coverage but it isn't wired,
+    /// offer a one-time, opt-in setup so `coverage_get` / the dossier have a real report.
+    @ViewBuilder private var coverageCallout: some View {
+        if let note = coverageNote {
+            CalloutBanner(.info, note)
+        } else if wiringCoverage {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text("Wiring coverage tooling…").font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
+            }
+        } else if case .missing(let tool)? = coverageStatus {
+            VStack(alignment: .leading, spacing: 8) {
+                CalloutBanner(.info, "Coverage isn't configured for this \(profile.name) project. Wire \(tool) so the build can measure coverage vs the soft 90% aim (data-driven TDD). Optional — it never blocks you.")
+                Button {
+                    wireCoverage()
+                } label: {
+                    Label("Wire \(tool) coverage", systemImage: "chart.bar.doc.horizontal")
+                }
+                .buttonStyle(.borderedProminent).controlSize(.small)
+            }
         }
     }
 
@@ -754,5 +783,44 @@ struct FeatureFlowView: View {
             toolchain = nil; return
         }
         toolchain = await ToolchainChecker.check(profile: profile, projectPath: project.path)
+    }
+
+    private func loadCoverageStatus() async {
+        guard viewedStage == .prerequisites else { coverageStatus = nil; return }
+        let profile = self.profile
+        let path = project.path
+        // Bounded filesystem scan — keep it off the main actor.
+        coverageStatus = await Task.detached { CoverageEnablement.status(profile: profile, projectPath: path) }.value
+    }
+
+    /// Spawns a one-shot setup worker (opt-in) to wire the mode's coverage tooling in
+    /// place on the current branch, its own commit. Re-probes afterward.
+    private func wireCoverage() {
+        guard !wiringCoverage, let instructions = CoverageEnablement.setupInstructions(profile: profile) else { return }
+        wiringCoverage = true
+        coverageNote = nil
+        let prompt = """
+        You are wiring code-coverage tooling into this project as a one-time setup. Work in the current directory (the project root). This is infrastructure only.
+
+        \(instructions)
+
+        Do ONLY the above — do not modify application code or existing tests. When done, `git add` the changed config files and `git commit` them with a clear message. Do NOT push, merge, or rebase.
+        """
+        Task { @MainActor in
+            let outcome = await spawner.runManagedWorker(
+                label: "coverage-setup", prompt: prompt, workingDirectory: project.path,
+                project: project, model: ModelRouter.latestOpus, apiKey: APIKeyResolver.resolve(),
+                store: store, server: server, approvalQueue: approvalQueue, maxTurns: 40,
+                featureId: live.id)
+            wiringCoverage = false
+            await loadCoverageStatus()
+            if case .wired? = coverageStatus {
+                coverageNote = "Coverage tooling wired ✓ — committed to this branch."
+            } else if outcome.completed {
+                coverageNote = "Setup worker finished but coverage still isn't detected — check the diff."
+            } else {
+                coverageNote = "Coverage setup didn't complete\(outcome.looksUsageLimited ? " (usage limit)" : "") — you can retry or wire it manually. This never blocks the build."
+            }
+        }
     }
 }

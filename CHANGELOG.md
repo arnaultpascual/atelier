@@ -40,6 +40,14 @@ All notable changes to Atelier are documented here. The format is based on
     augmented with concrete guidance: report progress, consult the original spec before deviating,
     record findings on discovered constraints, and check coverage before finishing. Without this the
     capability sat dormant (tools present but unprompted).
+
+- **Coverage tooling enablement (prerequisites)** — the feature-flow Prerequisites step now detects
+  whether the project has coverage tooling wired for its mode and, if not, offers a **one-time,
+  opt-in** setup (its own commit) so `coverage_get` / the dossier have a real report to read. Per
+  mode via `ProjectProfile.CoverageSetup` (probe + self-contained wiring instructions): **Android →
+  JaCoCo**, **.NET → coverlet**. Detection is a pure, bounded filesystem scan (`CoverageEnablement`);
+  wiring is applied by a scoped setup worker — never a silent mutation of your build files. (node /
+  python / web / swift slot into the same mechanism as follow-on catalog entries.)
   - Gated by an app-level kill-switch (`atelier.mcpCapabilityEnabled`, default on; set false to
     disable). A missing/unreachable server degrades to the pure file+git contract. New `AtelierTests`
     unit-test target added. Design + Phase 0 verification in `docs/mcp-capability.md`.

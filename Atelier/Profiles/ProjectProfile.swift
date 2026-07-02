@@ -50,6 +50,12 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
         /// test-improvement round. nil here falls back to 90 whenever a `coverageCommand` exists
         /// (see `coverageTarget`), so any mode that can measure coverage gets the ≥90% aim for free.
         var coverageTargetPct: Int? = nil
+        /// How to DETECT existing coverage tooling and, if missing, WIRE it. When set, the
+        /// feature-flow prerequisites step offers a one-time, opt-in setup (its own commit) so
+        /// `coverage_get` / the dossier have a real report to read. nil = no known setup for the mode
+        /// (or it's built-in and needs none). Detection ≠ mutation: setup is only ever applied on
+        /// explicit user opt-in.
+        var coverageSetup: CoverageSetup? = nil
         static let none = BuildConfig(buildCommand: nil, testCommands: [], testScaffoldingHint: nil,
                                       testDiscoveryGlobs: [], requiredTools: [])
 
@@ -61,6 +67,19 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
         var fastTestCommands: [TestCommand] { testCommands.filter { $0.tier == .fast } }
         /// Tools that must be present for the gate to even run (vs optional device tooling).
         var requiredToolsForGate: [ToolRequirement] { requiredTools.filter { $0.required } }
+    }
+
+    /// Per-mode coverage-tooling enablement: how to detect whether coverage is already
+    /// wired, and self-contained instructions for a worker to wire it if not.
+    struct CoverageSetup: Hashable, Sendable {
+        /// Config filenames (matched by suffix) to scan for `markers`.
+        var probeFiles: [String]     // e.g. ["build.gradle", "build.gradle.kts"]
+        /// If any marker (case-insensitive substring) appears in any probe file, coverage is wired.
+        var markers: [String]        // e.g. ["jacoco"]
+        /// Human label for the tool (UI callout), e.g. "JaCoCo".
+        var toolName: String
+        /// Self-contained instructions appended to a setup worker's prompt.
+        var instructions: String
     }
 
     struct TestCommand: Hashable, Sendable, Identifiable {
@@ -205,7 +224,18 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
                     .init(id: "adb", label: "adb / emulator (instrumented only)", probe: .executable("adb"),
                           installHint: "Needed only for `connectedDebugAndroidTest` (a running emulator/device). Optional for the JVM unit gate.",
                           required: false),
-                ]
+                ],
+                coverageSetup: .init(
+                    probeFiles: ["build.gradle", "build.gradle.kts"],
+                    markers: ["jacoco"],
+                    toolName: "JaCoCo",
+                    instructions: """
+                    Wire JaCoCo code coverage into this Android/Gradle project so a coverage XML report is produced for the JVM unit tests. Do this and NOTHING else — do not touch app code or existing tests.
+                    - Apply the `jacoco` plugin in the app module's build.gradle(.kts).
+                    - Add a `jacocoTestReport` task that depends on `testDebugUnitTest` and sets `reports { xml.required.set(true) }` (Groovy: `xml.required = true`), with class/source dirs for the `debug` variant. Exclude generated classes (R.class, BuildConfig, *_Impl, Hilt/Dagger, databinding).
+                    - Verify: `./gradlew testDebugUnitTest jacocoTestReport` exits 0 AND an XML report exists under `**/build/reports/jacoco/**/*.xml` (or `jacocoTestReport.xml`).
+                    - Commit ONLY the Gradle config changes (build.gradle(.kts), version catalog if used).
+                    """)
             )
         ),
         .init(
@@ -231,7 +261,17 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
                           installHint: "Install the .NET SDK 8 or 10 (https://dotnet.microsoft.com/download) — `dotnet` must be runnable.",
                           required: true),
                 ],
-                coverageCommand: "dotnet test --nologo --collect:\"XPlat Code Coverage\""
+                coverageCommand: "dotnet test --nologo --collect:\"XPlat Code Coverage\"",
+                coverageSetup: .init(
+                    probeFiles: [".csproj", ".fsproj"],
+                    markers: ["coverlet.collector", "coverlet.msbuild"],
+                    toolName: "coverlet",
+                    instructions: """
+                    Ensure `dotnet test --collect:"XPlat Code Coverage"` produces a Cobertura report. Do this and NOTHING else — do not touch tests or app code.
+                    - Add the `coverlet.collector` NuGet package to EACH test project that lacks it: `dotnet add <Test>.csproj package coverlet.collector`.
+                    - Verify: `dotnet test --collect:"XPlat Code Coverage"` exits 0 and writes a `coverage.cobertura.xml` under `**/TestResults/**`.
+                    - Commit ONLY the added package reference(s).
+                    """)
             )
         ),
         .init(
