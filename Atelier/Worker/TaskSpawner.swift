@@ -169,62 +169,33 @@ final class TaskSpawner {
                           featureId: String? = nil) async -> ManagedOutcome {
         let profile = ProjectProfile.find(id: project.profileId) ?? .generic
         let agentId = UUID()
-        let listener = ApprovalSocketListener(agentId: agentId.uuidString,
-                                              taskId: "feature-synthesis",
-                                              projectName: project.name,
-                                              queue: approvalQueue)
-        let socketPath: String
+        let session: WorkerSpawnSession
         do {
-            socketPath = try await listener.start()
+            session = try await WorkerSpawnSession.begin(
+                agentId: agentId, approvalTaskId: "feature-synthesis", project: project,
+                rulesWorktreePath: workingDirectory, server: server, approvalQueue: approvalQueue,
+                autopilot: true, mcpFeatureId: featureId, mcpTaskId: nil, store: store)
         } catch {
-            logger.error("managed worker socket failed: \(error.localizedDescription, privacy: .public)")
-            return ManagedOutcome(completed: false, costUsd: 0, looksUsageLimited: false)
-        }
-        approvalQueue.loadRules(forAgent: agentId.uuidString, project: project, worktreePath: workingDirectory)
-        approvalQueue.setAutopilot(true, forAgent: agentId.uuidString)
-        let configURL: URL
-        do {
-            configURL = try MCPConfig.writeTemporaryConfig(serverName: server.serverName,
-                                                           agentId: agentId, socketPath: socketPath)
-        } catch {
-            await listener.stop(reason: "config write failed")
-            logger.error("managed worker config failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("managed worker session failed: \(error.localizedDescription, privacy: .public)")
             return ManagedOutcome(completed: false, costUsd: 0, looksUsageLimited: false)
         }
         var dirs = additionalDirs
         if !dirs.contains(project.path) { dirs.append(project.path) }
 
-        // Optional MCP capability layer — feature-scoped, behind the kill-switch.
-        // Lets the synthesis / coverage-improvement worker read the spec + query
-        // coverage. Additive: any failure → continue without MCP.
-        var mcpConfigURL: URL? = nil
-        var mcpBridge: AtelierBridgeListener? = nil
+        // Teach the synthesis / coverage worker to use its MCP tools (if attached).
         var managedPrompt = prompt
-        if MCPCapability.isEnabled, let featureId {
-            let bridge = AtelierBridgeListener(agentId: agentId.uuidString, featureId: featureId,
-                                               projectPath: project.path, store: store)
-            do {
-                let mcpSocket = try await bridge.start()
-                mcpConfigURL = try MCPServerConfig.writeTemporaryConfig(
-                    agentId: agentId, socketPath: mcpSocket, featureId: featureId,
-                    taskId: nil, projectPath: project.path)
-                mcpBridge = bridge
-                approvalQueue.setMCPCapability(true, forAgent: agentId.uuidString)
-                managedPrompt += "\n\n" + MCPCapability.managedWorkerGuidance(featureId: featureId)
-            } catch {
-                logger.warning("mcp capability (managed) setup failed, continuing without: \(error.localizedDescription, privacy: .public)")
-                await bridge.stop(reason: "mcp setup failed"); mcpConfigURL = nil; mcpBridge = nil
-            }
+        if let fid = session.mcpFeatureId {
+            managedPrompt += "\n\n" + MCPCapability.managedWorkerGuidance(featureId: fid)
         }
 
         let runner = WorkerRunner()
         let invocation = WorkerRunner.Invocation(
             prompt: managedPrompt, model: model, apiKey: apiKey, agentId: agentId,
-            settingsPath: configURL.path, workingDirectory: workingDirectory,
+            settingsPath: session.settingsPath, workingDirectory: workingDirectory,
             additionalDirs: dirs, includePartialMessages: false, maxTurns: maxTurns,
             resumeSessionId: nil,
             extraEnv: ToolchainChecker.environmentExports(profile: profile, mainRepoPath: project.path),
-            mcpConfigPath: mcpConfigURL?.path)
+            mcpConfigPath: session.mcpConfigPath)
         let state = AgentState(); state.reset()
         let liveState = state
         let eventSink: @Sendable (StreamEvent) async -> Void = { event in
@@ -240,13 +211,7 @@ final class TaskSpawner {
             ok = false
             if liveState.status != .completed { liveState.markFailed(error.localizedDescription) }
         }
-        MCPConfig.cleanup(configURL)
-        await listener.stop(reason: "managed worker finished")
-        if let mcpConfigURL { MCPServerConfig.cleanup(mcpConfigURL) }
-        if let mcpBridge {
-            await mcpBridge.stop(reason: "managed worker finished")
-            approvalQueue.setMCPCapability(false, forAgent: agentId.uuidString)
-        }
+        await session.tearDown(reason: "managed worker finished")
         return ManagedOutcome(completed: ok && liveState.status == .completed,
                               costUsd: liveState.totalCostUsd,
                               looksUsageLimited: liveState.looksUsageLimited)
@@ -304,80 +269,26 @@ final class TaskSpawner {
             try? await store.updateTaskStatus(task, to: .inProgress)
         }
 
-        // 4. Start the per-spawn approval socket listener and write the MCP config
-        //    that points the helper at it.
+        // 4/5. Per-spawn scaffolding: approval socket + settings hook + (optional,
+        //      feature-scoped) MCP capability bridge — one object, one teardown.
         let agentId = UUID(uuidString: newAgent.id) ?? UUID()
-        let listener = ApprovalSocketListener(
-            agentId: agentId.uuidString,
-            taskId: task.id,
-            projectName: project.name,
-            queue: approvalQueue
-        )
-        let socketPath: String
+        let session: WorkerSpawnSession
         do {
-            socketPath = try await listener.start()
-            logger.info("approval socket: \(socketPath, privacy: .public)")
+            session = try await WorkerSpawnSession.begin(
+                agentId: agentId, approvalTaskId: task.id, project: project,
+                rulesWorktreePath: worktree.absolutePath, server: server, approvalQueue: approvalQueue,
+                autopilot: autopilot, mcpFeatureId: task.featureId, mcpTaskId: task.id, store: store)
         } catch {
-            logger.error("approval socket start failed: \(error.localizedDescription, privacy: .public)")
-            run.state.markFailed("Could not open approval socket: \(error.localizedDescription)")
+            logger.error("worker session setup failed: \(error.localizedDescription, privacy: .public)")
+            run.state.markFailed("Could not start worker session: \(error.localizedDescription)")
             finalize(run: run, status: .failed, store: store)
             return
-        }
-        // Load profile + per-project permission rules into the queue so any
-        // approval the helper enqueues gets evaluated against them.
-        approvalQueue.loadRules(forAgent: agentId.uuidString,
-                                project: project,
-                                worktreePath: worktree.absolutePath)
-        if autopilot { approvalQueue.setAutopilot(true, forAgent: agentId.uuidString) }
-        let configURL: URL
-        do {
-            configURL = try MCPConfig.writeTemporaryConfig(
-                serverName: server.serverName,
-                agentId: agentId,
-                socketPath: socketPath
-            )
-        } catch {
-            logger.error("MCP config write failed: \(error.localizedDescription, privacy: .public)")
-            await listener.stop(reason: "config write failed")
-            run.state.markFailed("Could not write MCP config: \(error.localizedDescription)")
-            finalize(run: run, status: .failed, store: store)
-            return
-        }
-
-        // 5b. Optional MCP capability layer — feature-scoped, behind the kill-switch.
-        //     Additive: on any failure we log and continue with the pure file+git
-        //     contract (no MCP), never failing the spawn.
-        var mcpConfigURL: URL? = nil
-        var mcpBridge: AtelierBridgeListener? = nil
-        if MCPCapability.isEnabled, let featureId = task.featureId {
-            let bridge = AtelierBridgeListener(agentId: agentId.uuidString,
-                                               featureId: featureId,
-                                               projectPath: project.path,
-                                               store: store)
-            do {
-                let mcpSocket = try await bridge.start()
-                mcpConfigURL = try MCPServerConfig.writeTemporaryConfig(
-                    agentId: agentId,
-                    socketPath: mcpSocket,
-                    featureId: featureId,
-                    taskId: task.id,
-                    projectPath: project.path
-                )
-                mcpBridge = bridge
-                approvalQueue.setMCPCapability(true, forAgent: agentId.uuidString)
-                logger.info("mcp capability on: socket=\(mcpSocket, privacy: .public)")
-            } catch {
-                logger.warning("mcp capability setup failed, continuing without: \(error.localizedDescription, privacy: .public)")
-                await bridge.stop(reason: "mcp setup failed")
-                mcpConfigURL = nil
-                mcpBridge = nil
-            }
         }
 
         // 6. Build prompt and additional dirs. When the MCP layer is attached, the
         //    prompt also teaches the worker to use its tools (progress/spec/findings/coverage).
         let prompt = Self.buildPrompt(task: task, project: project, profile: profile, worktree: worktree,
-                                      mcpFeatureId: mcpConfigURL != nil ? task.featureId : nil)
+                                      mcpFeatureId: session.mcpFeatureId)
         let attachmentsDir = URL(fileURLWithPath: project.path)
             .appendingPathComponent(".atelier")
             .appendingPathComponent("attachments")
@@ -397,14 +308,14 @@ final class TaskSpawner {
             model: model,
             apiKey: apiKey,
             agentId: agentId,
-            settingsPath: configURL.path,
+            settingsPath: session.settingsPath,
             workingDirectory: worktree.absolutePath,
             additionalDirs: additionalDirs,
             includePartialMessages: false,
             maxTurns: 80,
             resumeSessionId: nil,
             extraEnv: ToolchainChecker.environmentExports(profile: profile, mainRepoPath: project.path),
-            mcpConfigPath: mcpConfigURL?.path
+            mcpConfigPath: session.mcpConfigPath
         )
 
         run.statusHint = ""
@@ -509,14 +420,8 @@ final class TaskSpawner {
         run.agent.endedAt = Date()
         try? await store.updateAgent(run.agent)
 
-        // 10. Cleanup temp config + socket
-        MCPConfig.cleanup(configURL)
-        await listener.stop(reason: "worker finished")
-        if let mcpConfigURL { MCPServerConfig.cleanup(mcpConfigURL) }
-        if let mcpBridge {
-            await mcpBridge.stop(reason: "worker finished")
-            approvalQueue.setMCPCapability(false, forAgent: agentId.uuidString)
-        }
+        // 10. Tear down the per-spawn scaffolding (socket + settings + MCP).
+        await session.tearDown(reason: "worker finished")
         // Drop the transient live-progress badge + block reason now the build phase is over.
         await store.clearProgress(taskId: task.id)
         await store.clearBlockedReason(taskId: task.id)
@@ -583,59 +488,21 @@ final class TaskSpawner {
                                 approvalQueue: ApprovalQueue,
                                 autopilot: Bool = false) async {
         let agentUUID = UUID(uuidString: run.agent.id) ?? UUID()
-        let listener = ApprovalSocketListener(
-            agentId: agentUUID.uuidString,
-            taskId: task.id,
-            projectName: project.name,
-            queue: approvalQueue
-        )
-        let socketPath: String
+        let session: WorkerSpawnSession
         do {
-            socketPath = try await listener.start()
+            session = try await WorkerSpawnSession.begin(
+                agentId: agentUUID, approvalTaskId: task.id, project: project,
+                rulesWorktreePath: worktreePath, server: server, approvalQueue: approvalQueue,
+                autopilot: autopilot, mcpFeatureId: task.featureId, mcpTaskId: task.id, store: store)
         } catch {
-            run.state.markFailed("Could not open approval socket: \(error.localizedDescription)")
-            return
-        }
-        approvalQueue.loadRules(forAgent: agentUUID.uuidString,
-                                project: project,
-                                worktreePath: worktreePath)
-        if autopilot { approvalQueue.setAutopilot(true, forAgent: agentUUID.uuidString) }
-        let configURL: URL
-        do {
-            configURL = try MCPConfig.writeTemporaryConfig(
-                serverName: server.serverName,
-                agentId: agentUUID,
-                socketPath: socketPath
-            )
-        } catch {
-            await listener.stop(reason: "config write failed")
-            run.state.markFailed("Could not write MCP config: \(error.localizedDescription)")
+            run.state.markFailed("Could not start worker session: \(error.localizedDescription)")
             return
         }
 
-        // Optional MCP capability layer — feature-scoped, behind the kill-switch.
-        // Additive: on any failure we continue without MCP.
-        var mcpConfigURL: URL? = nil
-        var mcpBridge: AtelierBridgeListener? = nil
+        // Resumed session — if MCP is attached, remind the worker the tools are here.
         var iterateMessage = message
-        if MCPCapability.isEnabled, let featureId = task.featureId {
-            let bridge = AtelierBridgeListener(agentId: agentUUID.uuidString,
-                                               featureId: featureId,
-                                               projectPath: project.path,
-                                               store: store)
-            do {
-                let mcpSocket = try await bridge.start()
-                mcpConfigURL = try MCPServerConfig.writeTemporaryConfig(
-                    agentId: agentUUID, socketPath: mcpSocket, featureId: featureId,
-                    taskId: task.id, projectPath: project.path)
-                mcpBridge = bridge
-                approvalQueue.setMCPCapability(true, forAgent: agentUUID.uuidString)
-                // Resumed session — remind the worker the tools are here for this turn.
-                iterateMessage += "\n\n" + MCPCapability.taskWorkerGuidance(featureId: featureId)
-            } catch {
-                logger.warning("mcp capability (iterate) setup failed, continuing without: \(error.localizedDescription, privacy: .public)")
-                await bridge.stop(reason: "mcp setup failed"); mcpConfigURL = nil; mcpBridge = nil
-            }
+        if let fid = session.mcpFeatureId {
+            iterateMessage += "\n\n" + MCPCapability.taskWorkerGuidance(featureId: fid)
         }
 
         let runner = WorkerRunner()
@@ -644,7 +511,7 @@ final class TaskSpawner {
             model: run.agent.model,
             apiKey: apiKey,
             agentId: agentUUID,
-            settingsPath: configURL.path,
+            settingsPath: session.settingsPath,
             workingDirectory: worktreePath,
             additionalDirs: [project.path],
             includePartialMessages: false,
@@ -653,7 +520,7 @@ final class TaskSpawner {
             extraEnv: ToolchainChecker.environmentExports(
                 profile: ProjectProfile.find(id: project.profileId) ?? .generic,
                 mainRepoPath: project.path),
-            mcpConfigPath: mcpConfigURL?.path
+            mcpConfigPath: session.mcpConfigPath
         )
 
         run.statusHint = ""
@@ -695,13 +562,7 @@ final class TaskSpawner {
         run.agent.endedAt = Date()
         try? await store.updateAgent(run.agent)
 
-        MCPConfig.cleanup(configURL)
-        await listener.stop(reason: "iterate finished")
-        if let mcpConfigURL { MCPServerConfig.cleanup(mcpConfigURL) }
-        if let mcpBridge {
-            await mcpBridge.stop(reason: "iterate finished")
-            approvalQueue.setMCPCapability(false, forAgent: agentUUID.uuidString)
-        }
+        await session.tearDown(reason: "iterate finished")
         await store.clearProgress(taskId: task.id)
         await store.clearBlockedReason(taskId: task.id)
     }
