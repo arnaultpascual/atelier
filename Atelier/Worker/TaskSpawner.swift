@@ -165,7 +165,8 @@ final class TaskSpawner {
                           store: AppStore,
                           server: ApprovalServer,
                           approvalQueue: ApprovalQueue,
-                          maxTurns: Int = 60) async -> ManagedOutcome {
+                          maxTurns: Int = 60,
+                          featureId: String? = nil) async -> ManagedOutcome {
         let profile = ProjectProfile.find(id: project.profileId) ?? .generic
         let agentId = UUID()
         let listener = ApprovalSocketListener(agentId: agentId.uuidString,
@@ -192,13 +193,38 @@ final class TaskSpawner {
         }
         var dirs = additionalDirs
         if !dirs.contains(project.path) { dirs.append(project.path) }
+
+        // Optional MCP capability layer — feature-scoped, behind the kill-switch.
+        // Lets the synthesis / coverage-improvement worker read the spec + query
+        // coverage. Additive: any failure → continue without MCP.
+        var mcpConfigURL: URL? = nil
+        var mcpBridge: AtelierBridgeListener? = nil
+        var managedPrompt = prompt
+        if MCPCapability.isEnabled, let featureId {
+            let bridge = AtelierBridgeListener(agentId: agentId.uuidString, featureId: featureId,
+                                               projectPath: project.path, store: store)
+            do {
+                let mcpSocket = try await bridge.start()
+                mcpConfigURL = try MCPServerConfig.writeTemporaryConfig(
+                    agentId: agentId, socketPath: mcpSocket, featureId: featureId,
+                    taskId: nil, projectPath: project.path)
+                mcpBridge = bridge
+                approvalQueue.setMCPCapability(true, forAgent: agentId.uuidString)
+                managedPrompt += "\n\n" + MCPCapability.managedWorkerGuidance(featureId: featureId)
+            } catch {
+                logger.warning("mcp capability (managed) setup failed, continuing without: \(error.localizedDescription, privacy: .public)")
+                await bridge.stop(reason: "mcp setup failed"); mcpConfigURL = nil; mcpBridge = nil
+            }
+        }
+
         let runner = WorkerRunner()
         let invocation = WorkerRunner.Invocation(
-            prompt: prompt, model: model, apiKey: apiKey, agentId: agentId,
+            prompt: managedPrompt, model: model, apiKey: apiKey, agentId: agentId,
             settingsPath: configURL.path, workingDirectory: workingDirectory,
             additionalDirs: dirs, includePartialMessages: false, maxTurns: maxTurns,
             resumeSessionId: nil,
-            extraEnv: ToolchainChecker.environmentExports(profile: profile, mainRepoPath: project.path))
+            extraEnv: ToolchainChecker.environmentExports(profile: profile, mainRepoPath: project.path),
+            mcpConfigPath: mcpConfigURL?.path)
         let state = AgentState(); state.reset()
         let liveState = state
         let eventSink: @Sendable (StreamEvent) async -> Void = { event in
@@ -216,6 +242,11 @@ final class TaskSpawner {
         }
         MCPConfig.cleanup(configURL)
         await listener.stop(reason: "managed worker finished")
+        if let mcpConfigURL { MCPServerConfig.cleanup(mcpConfigURL) }
+        if let mcpBridge {
+            await mcpBridge.stop(reason: "managed worker finished")
+            approvalQueue.setMCPCapability(false, forAgent: agentId.uuidString)
+        }
         return ManagedOutcome(completed: ok && liveState.status == .completed,
                               costUsd: liveState.totalCostUsd,
                               looksUsageLimited: liveState.looksUsageLimited)
@@ -343,8 +374,10 @@ final class TaskSpawner {
             }
         }
 
-        // 6. Build prompt and additional dirs
-        let prompt = Self.buildPrompt(task: task, project: project, profile: profile, worktree: worktree)
+        // 6. Build prompt and additional dirs. When the MCP layer is attached, the
+        //    prompt also teaches the worker to use its tools (progress/spec/findings/coverage).
+        let prompt = Self.buildPrompt(task: task, project: project, profile: profile, worktree: worktree,
+                                      mcpFeatureId: mcpConfigURL != nil ? task.featureId : nil)
         let attachmentsDir = URL(fileURLWithPath: project.path)
             .appendingPathComponent(".atelier")
             .appendingPathComponent("attachments")
@@ -580,9 +613,34 @@ final class TaskSpawner {
             return
         }
 
+        // Optional MCP capability layer — feature-scoped, behind the kill-switch.
+        // Additive: on any failure we continue without MCP.
+        var mcpConfigURL: URL? = nil
+        var mcpBridge: AtelierBridgeListener? = nil
+        var iterateMessage = message
+        if MCPCapability.isEnabled, let featureId = task.featureId {
+            let bridge = AtelierBridgeListener(agentId: agentUUID.uuidString,
+                                               featureId: featureId,
+                                               projectPath: project.path,
+                                               store: store)
+            do {
+                let mcpSocket = try await bridge.start()
+                mcpConfigURL = try MCPServerConfig.writeTemporaryConfig(
+                    agentId: agentUUID, socketPath: mcpSocket, featureId: featureId,
+                    taskId: task.id, projectPath: project.path)
+                mcpBridge = bridge
+                approvalQueue.setMCPCapability(true, forAgent: agentUUID.uuidString)
+                // Resumed session — remind the worker the tools are here for this turn.
+                iterateMessage += "\n\n" + MCPCapability.taskWorkerGuidance(featureId: featureId)
+            } catch {
+                logger.warning("mcp capability (iterate) setup failed, continuing without: \(error.localizedDescription, privacy: .public)")
+                await bridge.stop(reason: "mcp setup failed"); mcpConfigURL = nil; mcpBridge = nil
+            }
+        }
+
         let runner = WorkerRunner()
         let invocation = WorkerRunner.Invocation(
-            prompt: message,
+            prompt: iterateMessage,
             model: run.agent.model,
             apiKey: apiKey,
             agentId: agentUUID,
@@ -594,7 +652,8 @@ final class TaskSpawner {
             resumeSessionId: sessionId,
             extraEnv: ToolchainChecker.environmentExports(
                 profile: ProjectProfile.find(id: project.profileId) ?? .generic,
-                mainRepoPath: project.path)
+                mainRepoPath: project.path),
+            mcpConfigPath: mcpConfigURL?.path
         )
 
         run.statusHint = ""
@@ -638,6 +697,13 @@ final class TaskSpawner {
 
         MCPConfig.cleanup(configURL)
         await listener.stop(reason: "iterate finished")
+        if let mcpConfigURL { MCPServerConfig.cleanup(mcpConfigURL) }
+        if let mcpBridge {
+            await mcpBridge.stop(reason: "iterate finished")
+            approvalQueue.setMCPCapability(false, forAgent: agentUUID.uuidString)
+        }
+        await store.clearProgress(taskId: task.id)
+        await store.clearBlockedReason(taskId: task.id)
     }
 
     private func finalize(run: ActiveRun, status: Agent.Status, store: AppStore) {
@@ -688,7 +754,8 @@ final class TaskSpawner {
     private static func buildPrompt(task: AtelierTask,
                                     project: Project,
                                     profile: ProjectProfile,
-                                    worktree: GitService.WorktreeInfo) -> String {
+                                    worktree: GitService.WorktreeInfo,
+                                    mcpFeatureId: String? = nil) -> String {
         var sections: [String] = []
         sections.append("# \(task.title)")
 
@@ -743,6 +810,12 @@ final class TaskSpawner {
 
         You're running in a git worktree (`\(worktree.absolutePath)`). The user reviews and merges manually — do not run `git merge`, `git push`, or `git rebase`. Commit liberally on this worktree's branch (`\(worktree.branch)`) so the user can review your diff.
         """)
+
+        // When the MCP capability layer is attached for this feature spawn, teach the
+        // worker to actually use its tools (progress, spec-referencing, findings, coverage).
+        if let mcpFeatureId {
+            sections.append(MCPCapability.taskWorkerGuidance(featureId: mcpFeatureId))
+        }
 
         return sections.joined(separator: "\n\n")
     }

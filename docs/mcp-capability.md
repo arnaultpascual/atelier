@@ -203,5 +203,6 @@ Tool + prompt names are underscored (`task_report_progress`, `brief_add_requirem
 - `plan_next_wave` is a real `ExecutionPlanner.runnableNow` query. (`wave_mark_done` was removed — it was inert; wave advancement is derived from task statuses.)
 - `coverage_*` read the newest standard report already in the calling task's worktree (no re-run, no branch checkout); multi-format (Cobertura/LCOV/json-summary/JaCoCo → swift/node/python/dotnet/android); target = `profile.build.coverageTarget ?? 90`.
 - Prompts (`atelier_decompose`/`refine_brief`/`review`/`synthesize_feature`) are self-contained static templates kept **faithful to Atelier's real `AIAssistant` prompts** (same instructional spine + JSON schema).
+- **Worker prompt augmentation** (`MCPCapability.taskWorkerGuidance` / `managedWorkerGuidance`): when MCP is attached, the worker's prompt is appended with directive guidance to use the tools — `buildPrompt` (build), `executeIterate` (fix loop, resumed-session reminder), and `runManagedWorker` (synthesis / coverage round). This is what turns the capability from "present" into "used": progress reporting, spec-referencing, findings, and coverage checks actually happen.
 
 Each phase: `xcodegen generate && xcodebuild … build` green, tests green, `/code-review high`, file+git fallback intact.

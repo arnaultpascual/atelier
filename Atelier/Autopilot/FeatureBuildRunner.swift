@@ -709,7 +709,8 @@ final class FeatureBuildRunner {
                     prompt: featureFixPrompt(result.summaryLine),
                     workingDirectory: deps.project.path,
                     project: deps.project, model: ModelRouter.latestOpus, apiKey: deps.apiKey,
-                    store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue)
+                    store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue,
+                    featureId: run.featureId)
                 run.synthesisCostUsd += outcome.costUsd
                 if outcome.looksUsageLimited { break }   // best-effort — don't pause the whole run for synthesis
                 result = await TestRunner.runFastTests(profile: profile, worktreePath: deps.project.path, mainRepoPath: deps.project.path)
@@ -732,7 +733,8 @@ final class FeatureBuildRunner {
                     prompt: featureBuildFixPrompt(cmd, String(tail.suffix(1500))),
                     workingDirectory: deps.project.path,
                     project: deps.project, model: ModelRouter.latestOpus, apiKey: deps.apiKey,
-                    store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue)
+                    store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue,
+                    featureId: run.featureId)
                 run.synthesisCostUsd += fix.costUsd
                 if fix.looksUsageLimited { break }
                 outcome = await TestRunner.runCommand(cmd, worktreePath: deps.project.path, profile: profile, mainRepoPath: deps.project.path)
@@ -762,7 +764,8 @@ final class FeatureBuildRunner {
                 prompt: coverageRoundPrompt(current: rate * 100, target: target),
                 workingDirectory: deps.project.path,
                 project: deps.project, model: ModelRouter.latestOpus, apiKey: deps.apiKey,
-                store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue)
+                store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue,
+                featureId: run.featureId)
             run.synthesisCostUsd += outcome.costUsd
             if !outcome.looksUsageLimited {
                 let after = await TestRunner.runFastTests(profile: profile, worktreePath: deps.project.path, mainRepoPath: deps.project.path)

@@ -35,6 +35,11 @@ All notable changes to Atelier are documented here. The format is based on
   - **Server-served prompts** — `atelier_decompose` / `atelier_refine_brief` / `atelier_review` /
     `atelier_synthesize_feature` (faithful to Atelier's own `AIAssistant` prompts) are discoverable
     via `prompts/list` + `prompts/get`.
+  - **Workers are taught to use the tools** — every feature-scoped build worker (and the iterate /
+    fix-loop worker, and the managed synthesis / coverage-improvement worker) now has its prompt
+    augmented with concrete guidance: report progress, consult the original spec before deviating,
+    record findings on discovered constraints, and check coverage before finishing. Without this the
+    capability sat dormant (tools present but unprompted).
   - Gated by an app-level kill-switch (`atelier.mcpCapabilityEnabled`, default on; set false to
     disable). A missing/unreachable server degrades to the pure file+git contract. New `AtelierTests`
     unit-test target added. Design + Phase 0 verification in `docs/mcp-capability.md`.
