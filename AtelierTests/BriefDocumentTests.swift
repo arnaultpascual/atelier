@@ -107,4 +107,20 @@ final class BriefDocumentTests: XCTestCase {
         XCTAssertTrue(doc.rendered().hasPrefix("# Title"))
         XCTAssertTrue(doc.rendered().contains("intro paragraph"))
     }
+
+    func testHeadingInsideCodeFenceIsNotASection() {
+        // A fenced code block containing a "## " line must NOT split into a section.
+        let md = "## Overview\n\nExample:\n\n```md\n## Not A Real Heading\nbody\n```\n\nafter"
+        let doc = BriefDocument.parse(md)
+        XCTAssertEqual(doc.sections.map { $0.heading }, ["Overview"])
+        XCTAssertTrue(doc.sections[0].body.contains("## Not A Real Heading"))
+    }
+
+    func testResolveOpenQuestionIgnoresNonCheckboxBullets() {
+        // A stray non-checkbox bullet in the section must not shift the index.
+        var doc = BriefDocument.parse("## Open Questions\n\n- context note\n- [ ] which db?\n- [ ] which auth?\n")
+        XCTAssertTrue(doc.resolveOpenQuestion(index: 2, answer: "OAuth"))
+        XCTAssertTrue(doc.rendered().contains("- [x] which auth? — **A:** OAuth"))
+        XCTAssertTrue(doc.rendered().contains("- [ ] which db?"))   // first question untouched
+    }
 }

@@ -65,6 +65,39 @@ final class CoverageReportTests: XCTestCase {
         XCTAssertNil(CoverageReport.parseJsonSummary("{}"))
     }
 
+    func testLcovClampsRateWhenHitExceedsFound() {
+        // Some instrumentation emits LH > LF on generated lines → must clamp to 100%.
+        let r = CoverageReport.parseLcov("SF:/x.js\nLF:5\nLH:8\nend_of_record")
+        XCTAssertEqual(r?.percent, 100)
+        XCTAssertEqual(r?.files.first?.rate, 1.0)
+    }
+
+    func testCoberturaReversedAttributeOrder() {
+        // filename after line-rate must still be captured.
+        let xml = #"<coverage line-rate="0.80"><class name="B" line-rate="0.50" filename="src/B.swift"></class></coverage>"#
+        let r = CoverageReport.parseCobertura(xml)
+        XCTAssertEqual(r?.percent, 80)
+        XCTAssertEqual(r?.files.first?.path, "src/B.swift")
+        XCTAssertEqual(r?.files.first?.rate, 0.5)
+    }
+
+    func testCoberturaOverallAnchoredToRootNotFirstClass() {
+        // Root <coverage> carries the overall rate even though a class rate appears too.
+        let xml = #"<coverage line-rate="0.40"><packages><package line-rate="0.90"><classes><class filename="a" line-rate="0.90"></class></classes></package></packages></coverage>"#
+        XCTAssertEqual(CoverageReport.parseCobertura(xml)?.percent, 40)
+    }
+
+    func testFindNotPrunedWhenBaseDirNameIsPruneWord() throws {
+        // A project whose own path contains ".build" must NOT prune its reports.
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(".build").appendingPathComponent("proj-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base.deletingLastPathComponent()) }
+        try #"<coverage line-rate="0.77"></coverage>"#
+            .write(to: base.appendingPathComponent("coverage.cobertura.xml"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(CoverageReport.find(in: base.path)?.percent, 77)
+    }
+
     func testFindPicksReportInDir() throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("cov-\(UUID().uuidString)")

@@ -36,6 +36,14 @@ final class BriefOpTests: XCTestCase {
             args: .object(["heading": .string("H")]), to: &doc))   // missing markdown
     }
 
+    func testEmptyOrWhitespaceRequiredArgsRejected() {
+        var doc = BriefDocument.parse("")
+        XCTAssertNil(AtelierBridgeListener.applyBriefOp("brief_set_overview", args: .object(["markdown": .string("")]), to: &doc))
+        XCTAssertNil(AtelierBridgeListener.applyBriefOp("brief_add_requirement", args: .object(["text": .string("   ")]), to: &doc))
+        XCTAssertNil(AtelierBridgeListener.applyBriefOp("spec_record_finding", args: .object(["finding": .string("\n")]), to: &doc))
+        XCTAssertTrue(doc.sections.isEmpty)   // nothing was created
+    }
+
     func testResolveOpenQuestion() {
         var doc = BriefDocument.parse("")
         _ = AtelierBridgeListener.applyBriefOp("brief_add_open_question", args: .object(["text": .string("which db?")]), to: &doc)

@@ -20,10 +20,15 @@ struct CoverageReport: Equatable {
 
     var percent: Int { Int((lineRate * 100).rounded()) }
 
-    /// Files below `targetPct`, worst first.
+    /// Files below `targetPct`, worst first. Compares the ROUNDED percent so the
+    /// filter agrees with the displayed per-file percent (no 89.5%-shown-as-90%-but-listed).
     func belowTarget(_ targetPct: Int) -> [FileCoverage] {
-        files.filter { $0.rate * 100 < Double(targetPct) }.sorted { $0.rate < $1.rate }
+        files.filter { Int(($0.rate * 100).rounded()) < targetPct }.sorted { $0.rate < $1.rate }
     }
+
+    /// Clamp a parsed rate into [0, 1] — some instrumentation emits LH > LF on
+    /// generated/inlined lines, which would otherwise yield >100%.
+    private static func clamp(_ r: Double) -> Double { min(1.0, max(0.0, r)) }
 
     // MARK: Discovery
 
@@ -54,9 +59,12 @@ struct CoverageReport: Equatable {
                                      includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
                                      options: []) else { return nil }
         var best: (path: String, date: Date)? = nil
+        let baseDepth = URL(fileURLWithPath: dir).standardizedFileURL.pathComponents.count
         for case let url as URL in en {
-            let comps = url.pathComponents
-            if comps.contains(where: { prunedDirs.contains($0) }) { en.skipDescendants(); continue }
+            // Only prune components BELOW the base dir — a project whose own path
+            // contains e.g. ".build" must not prune every report inside it.
+            let relComps = url.standardizedFileURL.pathComponents.dropFirst(baseDepth)
+            if relComps.contains(where: { prunedDirs.contains($0) }) { en.skipDescendants(); continue }
             guard reportFileNames.contains(url.lastPathComponent.lowercased()) else { continue }
             let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
             if best == nil || date > best!.date { best = (url.path, date) }
@@ -67,21 +75,23 @@ struct CoverageReport: Equatable {
     // MARK: Parsers
 
     static func parseCobertura(_ xml: String) -> CoverageReport? {
-        // Overall: the first `line-rate="…"` is on the root <coverage> element.
-        guard let overall = firstDouble(in: xml, pattern: #"line-rate="([0-9.]+)""#) else { return nil }
+        // Overall: anchor to the root <coverage …> element's line-rate; fall back
+        // to the first line-rate anywhere only if the root has none.
+        guard let overall = firstDouble(in: xml, pattern: #"<coverage\b[^>]*?line-rate="([0-9.]+)""#)
+                ?? firstDouble(in: xml, pattern: #"line-rate="([0-9.]+)""#) else { return nil }
         var files: [FileCoverage] = []
-        // Per <class filename="…" … line-rate="…">
-        let re = try? NSRegularExpression(pattern: #"<class\b[^>]*?filename="([^"]+)"[^>]*?line-rate="([0-9.]+)""#)
-        if let re {
+        // Per <class …>: extract filename + line-rate order-independently.
+        if let tagRe = try? NSRegularExpression(pattern: #"<class\b([^>]*)>"#) {
             let ns = xml as NSString
-            for m in re.matches(in: xml, range: NSRange(location: 0, length: ns.length)) {
-                let file = ns.substring(with: m.range(at: 1))
-                if let rate = Double(ns.substring(with: m.range(at: 2))) {
-                    files.append(FileCoverage(path: file, rate: rate))
+            for m in tagRe.matches(in: xml, range: NSRange(location: 0, length: ns.length)) {
+                let attrs = ns.substring(with: m.range(at: 1))
+                if let file = firstString(in: attrs, pattern: #"filename="([^"]+)""#),
+                   let rate = firstDouble(in: attrs, pattern: #"line-rate="([0-9.]+)""#) {
+                    files.append(FileCoverage(path: file, rate: clamp(rate)))
                 }
             }
         }
-        return CoverageReport(lineRate: overall, files: files)
+        return CoverageReport(lineRate: clamp(overall), files: files)
     }
 
     static func parseLcov(_ text: String) -> CoverageReport? {
@@ -92,7 +102,7 @@ struct CoverageReport: Equatable {
         var sawRecord = false
         func flush() {
             if let f = curFile, lf > 0 {
-                files.append(FileCoverage(path: f, rate: Double(lh) / Double(lf)))
+                files.append(FileCoverage(path: f, rate: clamp(Double(lh) / Double(lf))))
                 totalFound += lf; totalHit += lh
             }
             curFile = nil; lf = 0; lh = 0
@@ -106,7 +116,7 @@ struct CoverageReport: Equatable {
         }
         flush()
         guard sawRecord, totalFound > 0 else { return nil }
-        return CoverageReport(lineRate: Double(totalHit) / Double(totalFound), files: files)
+        return CoverageReport(lineRate: clamp(Double(totalHit) / Double(totalFound)), files: files)
     }
 
     static func parseJsonSummary(_ json: String) -> CoverageReport? {
@@ -118,15 +128,18 @@ struct CoverageReport: Equatable {
         guard let totalPct = pct(obj["total"]) else { return nil }
         var files: [FileCoverage] = []
         for (key, value) in obj where key != "total" {
-            if let p = pct(value) { files.append(FileCoverage(path: key, rate: p / 100.0)) }
+            if let p = pct(value) { files.append(FileCoverage(path: key, rate: clamp(p / 100.0))) }
         }
-        return CoverageReport(lineRate: totalPct / 100.0, files: files)
+        return CoverageReport(lineRate: clamp(totalPct / 100.0), files: files)
     }
 
     private static func firstDouble(in text: String, pattern: String) -> Double? {
+        firstString(in: text, pattern: pattern).flatMap(Double.init)
+    }
+    private static func firstString(in text: String, pattern: String) -> String? {
         guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
         let ns = text as NSString
         guard let m = re.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else { return nil }
-        return Double(ns.substring(with: m.range(at: 1)))
+        return ns.substring(with: m.range(at: 1))
     }
 }

@@ -464,6 +464,11 @@ struct FeatureFlowView: View {
                         }
                     }
                 }
+                // Blocked reason reported via task_signal_blocked (MCP), when set.
+                if t.status == .blocked, let reason = store.taskBlockedReason[t.id], !reason.isEmpty {
+                    Text(reason).font(.system(size: 9))
+                        .foregroundStyle(Palette.error).lineLimit(2)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
         }

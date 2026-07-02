@@ -484,8 +484,9 @@ final class TaskSpawner {
             await mcpBridge.stop(reason: "worker finished")
             approvalQueue.setMCPCapability(false, forAgent: agentId.uuidString)
         }
-        // Drop the transient live-progress badge now the build phase is over.
+        // Drop the transient live-progress badge + block reason now the build phase is over.
         await store.clearProgress(taskId: task.id)
+        await store.clearBlockedReason(taskId: task.id)
     }
 
     /// Re-spawns a worker that `--resume`s a prior claude session for the given

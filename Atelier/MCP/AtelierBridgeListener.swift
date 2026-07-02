@@ -219,33 +219,38 @@ actor AtelierBridgeListener {
     /// Pure brief-op dispatcher (unit-tested). Returns an ack message, or nil on
     /// bad args / unknown op / a resolve that found nothing.
     static func applyBriefOp(_ op: String, args: JSONValue, to doc: inout BriefDocument) -> String? {
+        // Required text args must be non-blank; optional ones pass through as-is.
+        func req(_ key: String) -> String? {
+            guard let s = args[key]?.stringValue, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return s
+        }
         switch op {
         case "brief_set_overview":
-            guard let md = args["markdown"]?.stringValue else { return nil }
+            guard let md = req("markdown") else { return nil }
             doc.setOverview(md); return "Overview updated."
         case "brief_append_section":
-            guard let h = args["heading"]?.stringValue, let md = args["markdown"]?.stringValue else { return nil }
+            guard let h = req("heading"), let md = req("markdown") else { return nil }
             doc.appendSection(heading: h, markdown: md); return "Section “\(h)” appended."
         case "brief_add_requirement":
-            guard let t = args["text"]?.stringValue else { return nil }
+            guard let t = req("text") else { return nil }
             doc.addRequirement(t, priority: args["priority"]?.stringValue); return "Requirement added."
         case "brief_add_acceptance_criterion":
-            guard let t = args["text"]?.stringValue else { return nil }
+            guard let t = req("text") else { return nil }
             doc.addAcceptanceCriterion(t); return "Acceptance criterion added."
         case "brief_add_open_question":
-            guard let t = args["text"]?.stringValue else { return nil }
+            guard let t = req("text") else { return nil }
             doc.addOpenQuestion(t); return "Open question recorded."
         case "brief_resolve_open_question":
-            guard let idx = args["index"]?.intValue, let a = args["answer"]?.stringValue else { return nil }
+            guard let idx = args["index"]?.intValue, let a = req("answer") else { return nil }
             return doc.resolveOpenQuestion(index: idx, answer: a) ? "Open question \(idx) resolved." : nil
         case "brief_record_decision":
-            guard let d = args["decision"]?.stringValue, let r = args["rationale"]?.stringValue else { return nil }
+            guard let d = req("decision"), let r = req("rationale") else { return nil }
             doc.recordDecision(d, rationale: r); return "Decision recorded."
         case "brief_attach_reference":
-            guard let u = args["urlOrPath"]?.stringValue else { return nil }
+            guard let u = req("urlOrPath") else { return nil }
             doc.attachReference(u, note: args["note"]?.stringValue); return "Reference attached."
         case "spec_record_finding":
-            guard let f = args["finding"]?.stringValue else { return nil }
+            guard let f = req("finding") else { return nil }
             doc.recordFinding(f, impact: args["impact"]?.stringValue, workaround: args["workaround"]?.stringValue)
             return "Finding recorded in the spec."
         default:
@@ -261,10 +266,15 @@ actor AtelierBridgeListener {
               let status = AtelierTask.Status(rawValue: statusStr) else {
             return .failure(id: req.id, error: "invalid status (use: \(AtelierTask.Status.allCases.map(\.rawValue).joined(separator: ", ")))")
         }
+        // `.done` is a MERGE outcome owned by the app — a worker can't self-declare it.
+        guard status != .done else {
+            return .failure(id: req.id, error: "cannot set Done via MCP — Done follows a successful merge. Use Review when ready.")
+        }
         // fresh-read-then-write to avoid clobbering concurrently-set fields (testState etc.)
         guard var task = await store.freshTask(taskId) else { return .failure(id: req.id, error: "task \(taskId) not found") }
         task.status = status
         do { try await store.updateTask(task) } catch { return .failure(id: req.id, error: error.localizedDescription) }
+        if status != .blocked { await MainActor.run { store.clearBlockedReason(taskId: taskId) } }
         return .success(id: req.id, result: msg("Task \(taskId) → \(status.rawValue)."))
     }
 
@@ -276,7 +286,7 @@ actor AtelierBridgeListener {
         do { try await store.updateTask(task) } catch { return .failure(id: req.id, error: error.localizedDescription) }
         let needs = req.args["needs"]?.stringValue.map { " Needs: \($0)" } ?? ""
         await MainActor.run { store.setBlockedReason(taskId: taskId, reason: reason + needs) }
-        return .success(id: req.id, result: msg("Task \(taskId) blocked — surfaced to the human."))
+        return .success(id: req.id, result: msg("Task \(taskId) moved to Blocked; reason recorded on the card."))
     }
 
     private func handleGetDependencies(_ req: BridgeRequest, store: AppStore) async -> BridgeResponse {
@@ -286,7 +296,7 @@ actor AtelierBridgeListener {
         var lines: [String] = []
         var allDone = true
         for depId in task.dependsOn {
-            let dep = await store.taskByID(depId)
+            let dep = await store.freshTask(depId)   // committed row, not the lagging cache
             let status = dep?.status.rawValue ?? "unknown"
             if dep?.status != .done { allDone = false }
             lines.append("- \(depId): \(status)\(dep == nil ? " (not found)" : "")")
@@ -313,18 +323,21 @@ actor AtelierBridgeListener {
 
     private func handleTestReportRun(_ req: BridgeRequest, store: AppStore) async -> BridgeResponse {
         guard let taskId = req.taskId, !taskId.isEmpty else { return .failure(id: req.id, error: "missing taskId") }
-        let passed = req.args["passed"]?.intValue ?? 0
-        let failed = req.args["failed"]?.intValue ?? 0
+        guard let passed = req.args["passed"]?.intValue, let failed = req.args["failed"]?.intValue else {
+            return .failure(id: req.id, error: "passed and failed are required integers")
+        }
         let skipped = req.args["skipped"]?.intValue
         let coveragePct = req.args["coveragePct"]?.intValue
         guard var task = await store.freshTask(taskId) else { return .failure(id: req.id, error: "task \(taskId) not found") }
-        task.testState = (failed == 0) ? .green : .red
-        var summary = "\(passed) passed / \(failed) failed"
+        // INFORMATIONAL ONLY. We deliberately do NOT write `testState` — that is the
+        // deterministic, Atelier-run merge gate (see TaskSpawner's post-run gate). A
+        // worker's self-reported counts must never be able to flip the gate green.
+        var summary = "worker-reported: \(passed) passed / \(failed) failed"
         if let skipped { summary += " / \(skipped) skipped" }
         if let coveragePct { summary += " · coverage \(coveragePct)%" }
         task.testSummary = summary
         do { try await store.updateTask(task) } catch { return .failure(id: req.id, error: error.localizedDescription) }
-        return .success(id: req.id, result: msg("Test run recorded: \(summary)."))
+        return .success(id: req.id, result: msg("Recorded (advisory): \(summary). The merge gate still runs the tests itself."))
     }
 
     private func handleReviewRequest(_ req: BridgeRequest, store: AppStore) async -> BridgeResponse {

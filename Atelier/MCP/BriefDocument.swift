@@ -40,8 +40,11 @@ struct BriefDocument: Equatable {
             currentBody = []
         }
 
+        var inFence = false
         for line in text.components(separatedBy: "\n") {
-            if line.hasPrefix("## ") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") { inFence.toggle() }
+            if !inFence, line.hasPrefix("## ") {
                 flush()
                 currentHeading = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
             } else if currentHeading == nil {
@@ -143,11 +146,12 @@ struct BriefDocument: Equatable {
         guard let sec = indexOfSection("Open Questions") else { return false }
         var lines = sections[sec].body.components(separatedBy: "\n")
         var count = 0
-        for (i, line) in lines.enumerated() where line.hasPrefix("- ") {
+        // Count only checkbox question bullets ("- [ ]" / "- [x]"), so unrelated
+        // bullets or sub-bullets don't shift the index.
+        for (i, line) in lines.enumerated() where line.hasPrefix("- [ ]") || line.hasPrefix("- [x]") {
             count += 1
             if count == index {
-                var resolved = line.replacingOccurrences(of: "- [ ]", with: "- [x]")
-                if resolved == line { resolved = line }  // tolerate a non-checkbox bullet
+                let resolved = line.replacingOccurrences(of: "- [ ]", with: "- [x]")
                 lines[i] = "\(resolved) — **A:** \(answer)"
                 sections[sec].body = lines.joined(separator: "\n")
                 return true

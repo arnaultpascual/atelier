@@ -186,11 +186,20 @@ This keeps guardrail §2.1 ("capability only, never permissions") true: we never
 
 ---
 
-## 11. Phasing (unchanged, walking-skeleton first)
+## 11. Phasing — ALL PHASES SHIPPED
 
-- **P1** — `AtelierMCPServer` speaking minimal MCP + `AtelierBridgeListener` + **1 tool** (`task.report_progress` → live ephemeral kanban %) + **1 resource** (`atelier://feature/{id}/spec` = living `brief.md`). Thread `featureId`/`taskId`. Add `AtelierTests` (codec + bridge). Kill-switch OFF. E2E proof against the smoke fixture. **Zero migrations.**
-- **P2** — `brief.*` tools + `spec.record_finding` (D1 write-back) + `spec`/`brief` resources + preview integration.
-- **P3** — `coverage.*` (multi-mode parsers, D3), `test.report_run`, `task.*`, `wave.*`.
-- **P4** — prompts, docs, CHANGELOG, flag default-on, final `/code-review high`.
+- **P1 ✅** — `AtelierMCPServer` (MCP over stdio) + `AtelierBridgeListener` + `task_report_progress` (live ephemeral kanban %) + `atelier://feature/{id}/spec`|`brief`. `featureId`/`taskId` threaded; `AtelierTests` added; E2E proven; zero migrations.
+- **P2 ✅** — `brief_*` tools + `spec_record_finding` (D1) via the `BriefDocument` canonical-section model → app-side writes to `brief.md` + live `PreparePromptView` refresh (`AppStore.briefRevision`). MCP wired into the brief-stage **chat** spawn (`ChatSpawner` + `PreparePromptView.featureId`).
+- **P3 ✅** — `coverage_get`/`coverage_uncovered` via a multi-format `CoverageReport` parser (Cobertura/LCOV/json-summary → swift/node/python/dotnet, soft 90% for all modes, D3); `test_report_run`, `task_update_status`, `task_signal_blocked`, `task_get_dependencies`, `plan_next_wave`, `wave_mark_done`, `review_request` — all fresh-read-then-write through `AppStore` on `@MainActor`.
+- **P4 ✅** — server-served prompts (`atelier_decompose`/`atelier_refine_brief`/`atelier_review`/`atelier_synthesize_feature`) via `prompts/list`+`prompts/get`; kill-switch **default-ON**; CHANGELOG entry.
+
+### Naming (tools/prompts use underscores)
+Tool + prompt names are underscored (`task_report_progress`, `brief_add_requirement`, `atelier_review`); dotted names are silently dropped by claude (Test 8). The design's `brief.*` notation maps to `brief_*`.
+
+### Implemented semantics worth noting
+- `review_request` marks the task `.review` (ready-for-review signal); it does not run a nested AI review inline.
+- `wave_mark_done` is a benign ack — wave advancement is derived from task statuses via `ExecutionPlanner`; `plan_next_wave` is the real query.
+- `coverage_*` read the newest standard report already in the calling task's worktree (no re-run, no branch checkout); target = `profile.build.coverageTarget ?? 90`.
+- `task_signal_blocked` flips status `.blocked` (durable) + records an ephemeral `AppStore.taskBlockedReason`.
 
 Each phase: `xcodegen generate && xcodebuild … build` green, tests green, `/code-review high`, file+git fallback intact.
