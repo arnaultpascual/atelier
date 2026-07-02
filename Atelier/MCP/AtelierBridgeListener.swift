@@ -170,9 +170,6 @@ actor AtelierBridgeListener {
             return await handleGetDependencies(req, store: store)
         case "plan_next_wave":
             return await handlePlanNextWave(req, store: store)
-        case "wave_mark_done":
-            let wave = req.args["wave"]?.intValue.map { " \($0)" } ?? ""
-            return .success(id: req.id, result: msg("Wave\(wave) marked done — the next wave is computed from task statuses."))
         case "test_report_run":
             return await handleTestReportRun(req, store: store)
         case "review_request":
@@ -342,10 +339,28 @@ actor AtelierBridgeListener {
 
     private func handleReviewRequest(_ req: BridgeRequest, store: AppStore) async -> BridgeResponse {
         guard let taskId = req.taskId, !taskId.isEmpty else { return .failure(id: req.id, error: "missing taskId") }
-        guard var task = await store.freshTask(taskId) else { return .failure(id: req.id, error: "task \(taskId) not found") }
-        task.status = .review
-        do { try await store.updateTask(task) } catch { return .failure(id: req.id, error: error.localizedDescription) }
-        return .success(id: req.id, result: msg("Task \(taskId) marked ready for review."))
+        guard let task = await store.freshTask(taskId) else { return .failure(id: req.id, error: "task \(taskId) not found") }
+        // Run the SAME Opus reviewer the autopilot uses, against the task's worktree.
+        // This is a long call (spawns a review worker) — the tool blocks until it returns.
+        guard let worktree = (try? await store.agentsForTask(taskId))?.first?.worktreePath, !worktree.isEmpty else {
+            return .failure(id: req.id, error: "no worktree for task \(taskId) yet — nothing to review")
+        }
+        let fid = self.featureId
+        let base = await MainActor.run { store.featureByID(fid)?.integrationBranch } ?? "main"
+        let key = await MainActor.run { APIKeyResolver.resolve() }
+        do {
+            let report = try await AIAssistant.reviewWorktree(
+                taskTitle: task.title,
+                taskDescription: task.descriptionMd ?? "",
+                worktreePath: worktree,
+                baseBranch: base,
+                apiKey: key.isEmpty ? nil : key)
+            let findings = report.findings.isEmpty ? "No findings."
+                : report.findings.map { "• \($0.oneLine)" }.joined(separator: "\n")
+            return .success(id: req.id, result: msg("Review [\(report.verdict.rawValue)] — \(report.summary)\n\(findings)"))
+        } catch {
+            return .failure(id: req.id, error: "review failed: \(error.localizedDescription)")
+        }
     }
 
     // MARK: coverage (Phase 3, D3 multi-mode)

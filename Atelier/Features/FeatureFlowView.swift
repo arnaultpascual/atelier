@@ -194,7 +194,7 @@ struct FeatureFlowView: View {
         VStack(alignment: .leading, spacing: 16) {
             stageHeading(.brief)
             if let roomId = live.briefRoomId, store.chatRoom(id: roomId) != nil {
-                PreparePromptView(store: store, chatSpawner: chatSpawner, project: project, pinnedBriefId: roomId, featureId: live.id)
+                PreparePromptView(store: store, chatSpawner: chatSpawner, project: project, pinnedBriefId: roomId)
                     .frame(height: 600)
                     .background(Color.atelierSurface.opacity(0.25), in: RoundedRectangle(cornerRadius: AtelierCorner.card))
                     .overlay(RoundedRectangle(cornerRadius: AtelierCorner.card).stroke(Color.atelierDivider, lineWidth: 1))

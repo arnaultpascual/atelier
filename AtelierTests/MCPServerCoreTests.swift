@@ -169,10 +169,11 @@ final class MCPServerCoreTests: XCTestCase {
         let names = await core().handle(req(30, "tools/list"), bridge: alwaysOK())
             .flatMap { $0.result?["tools"]?.arrayValue }?.compactMap { $0["name"]?.stringValue } ?? []
         for expected in ["brief_add_requirement", "brief_resolve_open_question", "spec_record_finding",
-                         "task_update_status", "task_get_dependencies", "wave_mark_done",
+                         "task_update_status", "task_get_dependencies",
                          "plan_next_wave", "coverage_get", "coverage_uncovered", "test_report_run", "review_request"] {
             XCTAssertTrue(names.contains(expected), "missing \(expected)")
         }
+        XCTAssertFalse(names.contains("wave_mark_done"))   // removed: it was an inert no-op
         XCTAssertFalse(names.contains { $0.contains(".") })
     }
 
@@ -253,9 +254,9 @@ final class MCPServerCoreTests: XCTestCase {
                                          "arguments": .object(["task_title": .string("Add login")])])
         let r = await core().handle(req(41, "prompts/get", params), bridge: alwaysOK())
         let text = r?.result?["messages"]?.arrayValue?.first?["content"]?["text"]?.stringValue ?? ""
-        XCTAssertTrue(text.contains("Add login"))       // provided arg
-        XCTAssertTrue(text.contains("base branch main")) // default substituted
-        XCTAssertFalse(text.contains("{{"))              // no unsubstituted placeholders
+        XCTAssertTrue(text.contains("Add login"))          // provided arg
+        XCTAssertTrue(text.contains("git diff main...HEAD")) // base_branch default substituted
+        XCTAssertFalse(text.contains("{{"))                // no unsubstituted placeholders
     }
 
     func testPromptsGetUnknownIsInvalidParams() async {

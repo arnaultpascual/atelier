@@ -20,16 +20,21 @@ All notable changes to Atelier are documented here. The format is based on
   - **Structured brief building** — `brief_set_overview` / `brief_add_requirement` /
     `brief_add_acceptance_criterion` / `brief_add_open_question` / `brief_resolve_open_question` /
     `brief_record_decision` / `brief_attach_reference` / `brief_append_section` serialize into the
-    canonical living `brief.md`; the Prepare-Prompt preview refreshes live.
+    canonical living `brief.md` (via the `BriefDocument` model). These operate in feature BUILD
+    spawns; the interactive Brief-stage chat keeps Claude as the sole writer of `brief.md` (no
+    two-writer race). The Prepare-Prompt preview refreshes live when the bridge writes the brief.
   - **Always-referenceable spec** — `atelier://feature/{id}/spec` (and `/brief`) expose the living
     brief as an MCP resource; `spec_record_finding` lets a worker record a discovered constraint +
     workaround so other feature workers and reviewers see it.
   - **Data-driven TDD** — `coverage_get` / `coverage_uncovered` report coverage vs the soft 90%
     target across **swift, node, python, dotnet and android** (a multi-format Cobertura / LCOV /
-    json-summary / JaCoCo parser); `test_report_run` records a structured run; `task_update_status`, `task_signal_blocked`,
-    `task_get_dependencies`, `plan_next_wave`, `wave_mark_done`, `review_request` round out the surface.
+    json-summary / JaCoCo parser); `test_report_run` records an advisory run (it does NOT flip the
+    deterministic merge gate); `task_update_status` (Done reserved for merge), `task_signal_blocked`
+    (reason surfaced on the card), `task_get_dependencies`, `plan_next_wave`, and `review_request`
+    (runs the same Opus reviewer the autopilot uses) round out the surface.
   - **Server-served prompts** — `atelier_decompose` / `atelier_refine_brief` / `atelier_review` /
-    `atelier_synthesize_feature` are discoverable via `prompts/list` + `prompts/get`.
+    `atelier_synthesize_feature` (faithful to Atelier's own `AIAssistant` prompts) are discoverable
+    via `prompts/list` + `prompts/get`.
   - Gated by an app-level kill-switch (`atelier.mcpCapabilityEnabled`, default on; set false to
     disable). A missing/unreachable server degrades to the pure file+git contract. New `AtelierTests`
     unit-test target added. Design + Phase 0 verification in `docs/mcp-capability.md`.

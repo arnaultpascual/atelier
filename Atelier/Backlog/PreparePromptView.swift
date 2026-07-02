@@ -15,9 +15,6 @@ struct PreparePromptView: View {
     /// Fill kanban" chrome and no fixed sheet frame — so it can be embedded inline (e.g. inside the
     /// feature flow's Brief stage). nil = the standalone sheet behaviour.
     var pinnedBriefId: String? = nil
-    /// The feature this brief belongs to (embedded feature flow). Enables the MCP
-    /// capability layer for the brief chat so the worker can use the brief_* tools.
-    var featureId: String? = nil
     /// (briefText, attachments, inspectRepo) → seeds the Fill Kanban compose screen. Unused when embedded.
     var onSendToFillKanban: (String, [URL], Bool) -> Void = { _, _, _ in }
     var onClose: () -> Void = {}
@@ -490,8 +487,7 @@ struct PreparePromptView: View {
                          allowWeb: webEnabled || !room.contextLinks.isEmpty,
                          allowFileEdit: embedded,   // embedded: Claude maintains brief.md live
                          contextPath: pins.first,
-                         extraDirs: Array(pins.dropFirst()),
-                         featureId: featureId)
+                         extraDirs: Array(pins.dropFirst()))
         draft = ""
         attachments = []
     }
@@ -597,8 +593,7 @@ struct PreparePromptView: View {
                          allowWeb: false,
                          allowFileEdit: embedded,
                          contextPath: pins.first,
-                         extraDirs: Array(pins.dropFirst()),
-                         featureId: featureId)
+                         extraDirs: Array(pins.dropFirst()))
     }
 
     /// Called when a refine pass completes: load the rewritten brief, judge convergence, then loop

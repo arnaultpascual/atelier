@@ -69,7 +69,7 @@ public struct MCPServerCore: Sendable {
         "brief_set_overview", "brief_append_section", "brief_add_requirement",
         "brief_add_acceptance_criterion", "brief_add_open_question", "brief_resolve_open_question",
         "brief_record_decision", "brief_attach_reference", "spec_record_finding",
-        "task_update_status", "task_signal_blocked", "wave_mark_done",
+        "task_update_status", "task_signal_blocked",
         "test_report_run", "review_request",
     ]
 
@@ -153,9 +153,6 @@ public struct MCPServerCore: Sendable {
             ToolDef(name: "task_get_dependencies",
                 description: "List tasks the given task depends on and whether they're done (are you runnable now?).",
                 inputSchema: Self.schema(["taskId": Self.strProp("Task id; defaults to the current task.")], required: [])),
-            ToolDef(name: "wave_mark_done",
-                description: "Advisory signal that the current dependency wave is complete. The next wave is derived automatically from task statuses — call plan_next_wave to see what's runnable.",
-                inputSchema: Self.schema(["wave": Self.intProp("Wave/round number just completed.")], required: [])),
             ToolDef(name: "plan_next_wave",
                 description: "Ask which feature tasks are runnable now (the next wave).",
                 inputSchema: Self.schema([:], required: [])),
@@ -225,97 +222,170 @@ public struct MCPServerCore: Sendable {
         }
     }
 
+    // These mirror Atelier's real AIAssistant/PreparePromptView prompts (same
+    // instructional spine + JSON schema), assembled from arguments so they stay
+    // self-contained (no app round-trip). Kept faithful to the shipped prompts.
     static let prompts: [PromptDef] = [
         PromptDef(
             name: "atelier_decompose",
-            description: "Decompose a feature brief into self-contained, single-worker TDD tasks.",
+            description: "Decompose a feature brief into self-contained, single-worker-sized, conflict-minimal, dependency-explicit task drafts (Atelier's Opus decomposer).",
             arguments: [
                 PromptArg(name: "brief", description: "The feature brief.", required: true, defaultValue: ""),
                 PromptArg(name: "project_name", description: "Project name.", required: false, defaultValue: "this project"),
-                PromptArg(name: "profile_name", description: "Project profile/mode.", required: false, defaultValue: "generic"),
+                PromptArg(name: "profile_name", description: "Project profile/mode name.", required: false, defaultValue: "generic"),
+                PromptArg(name: "profile_id", description: "Project profile/mode id.", required: false, defaultValue: "generic"),
+                PromptArg(name: "default_model", description: "Project default model.", required: false, defaultValue: "claude-sonnet-4-6"),
                 PromptArg(name: "existing_titles", description: "Existing task titles to avoid duplicating.", required: false, defaultValue: "(none yet)"),
             ],
             template: """
-            You are Atelier's task decomposer. Break the feature brief into a JSON array of self-contained, single-worker-sized task drafts.
+            You are the task decomposer for Atelier, a macOS IDE that orchestrates Claude Code workers.
 
-            FEATURE BRIEF:
+            HOW YOUR OUTPUT IS EXECUTED — this changes everything:
+            - Each task you emit is handed to a SEPARATE Claude Code worker.
+            - Each worker runs in its OWN git worktree, in parallel with the others.
+            - A worker sees ONLY its own task description — NOT this brief, NOT the other tasks, NOT this conversation. If a fact isn't in the task's own description, the worker does not have it.
+            - Worktrees merge back independently, so two tasks that edit the SAME file collide on merge.
+
+            Therefore every task MUST be:
+            1. SELF-CONTAINED — restate every relevant fact, name, value, shape and decision the worker needs. Never write "as above" or "see the brief".
+            2. SINGLE-WORKER-SIZED — one focused ~1-PR change finishable in a single spawn. Split bigger work.
+            3. CONFLICT-MINIMAL — partition along file/module boundaries; state each task's file area AND what it must NOT touch (owned by siblings).
+            4. DEPENDENCY-EXPLICIT — declare depends_on where a task needs another's output; think in EXECUTION WAVES and maximise parallelism (a dependency only when genuinely needed).
+
+            Project: {{project_name}}
+            Profile: {{profile_name}} ({{profile_id}})
+            Project default model: {{default_model}}
+            Existing task titles (don't duplicate):
+            {{existing_titles}}
+
+            Brief:
+            \"\"\"
             {{brief}}
+            \"\"\"
 
-            PROJECT: {{project_name}} (profile: {{profile_name}})
-            EXISTING TASK TITLES (avoid duplicates): {{existing_titles}}
+            For EACH task, the `description` IS the worker's entire brief. Write it as tight markdown with these sections (drop one only if genuinely empty):
+            ## Goal — one sentence: the outcome.
+            ## Context — self-contained background: relevant facts, data shapes, names, endpoints, constraints.
+            ## Steps — numbered, concrete, in order.
+            ## Files — specific files/dirs to create or edit, then a "Do not touch:" line naming sibling-owned areas.
+            ## Acceptance criteria — testable bullets defining "done" (commands to run, behaviour to observe).
 
-            Rules:
-            - Each task must be independently buildable by one worker via strict TDD (tests first).
-            - Prefer 3–8 tasks, each with a clear, testable outcome.
-            - Declare dependencies by task ref where ordering matters.
-            - Always reference the original brief/spec; never invent scope.
-
-            Return ONLY a JSON array; each element: {"ref","title","descriptionMd","priority","dependsOnRefs":[]}.
+            Output ONLY this JSON object — no preamble, no fences:
+            {
+              "tasks": [
+                {"id":"t1","title":"...","description":"## Goal\\n...","priority":"medium","labels":["..."],"depends_on":[],"suggested_model":"claude-sonnet-4-6"}
+              ]
+            }
+            Aim for 3–12 tasks. Prefer more small self-contained tasks over few big ones — small tasks parallelise and merge cleanly.
             """),
         PromptDef(
             name: "atelier_refine_brief",
-            description: "Refine the living feature brief toward a complete, testable spec.",
+            description: "Critique + resolve + rewrite the consolidated feature brief toward a complete, objectively-testable spec, then emit the convergence trailer.",
             arguments: [
-                PromptArg(name: "current", description: "Current brief.md contents.", required: true, defaultValue: ""),
-                PromptArg(name: "input", description: "New input to incorporate.", required: false, defaultValue: ""),
-                PromptArg(name: "sentinel", description: "Convergence trailer.", required: false, defaultValue: "<<BRIEF-STABLE>>"),
+                PromptArg(name: "current", description: "Current distilled brief (empty for the first pass).", required: false, defaultValue: ""),
+                PromptArg(name: "coverage", description: "Optional coverage aim clause, e.g. ' and a coverage AIM of ≥ 90%'.", required: false, defaultValue: ""),
+                PromptArg(name: "sentinel", description: "Machine convergence trailer sentinel.", required: false, defaultValue: "<<ATELIER-REFINE>>"),
             ],
             template: """
-            Refine this living feature brief. Incorporate the new input and rewrite the brief so it is complete, unambiguous, and testable.
+            Refinement pass. Re-ground on the ORIGINAL request and ALL context above, then improve the brief.
 
-            CURRENT BRIEF:
+            Current distilled brief to critique and improve (if empty, produce the first consolidated version):
+            \"\"\"
             {{current}}
+            \"\"\"
 
-            NEW INPUT:
-            {{input}}
+            Do, in order:
+            1. CRITIQUE: find the open questions, gaps, ambiguities, and any acceptance criteria that aren't objectively testable.
+            2. RESOLVE: answer each by making the most reasonable assumption given the original request and pinned context — and STATE those assumptions explicitly. Keep an item as an OPEN QUESTION only if it genuinely needs the human and would change the implementation.
+            3. REWRITE the single consolidated brief as clean markdown (no fences) with these sections, dropping none:
+            ## Goal — one sentence outcome.
+            ## Context — self-contained background + the assumptions you made this pass.
+            ## Constraints — hard requirements, non-goals, what not to touch.
+            ## Acceptance criteria — objectively TESTABLE bullets. Strict TDD: each verifiable by a test written first that then passes{{coverage}}.
+            ## Open questions — genuinely-blocking questions for the human, or "None".
 
-            Keep the canonical sections (Overview, Requirements, Acceptance Criteria, Open Questions, Decisions, References). Prefer Atelier's structured brief_* MCP tools to edit sections when available. When the brief is stable and needs no more open questions, end your message with the machine trailer: {{sentinel}}
+            Then, on a NEW LINE after the brief, output EXACTLY this trailer (no fences, nothing after it):
+            {{sentinel}}
+            {"open_questions": ["..."], "materially_changed": true|false, "stable": true|false}
             """),
         PromptDef(
             name: "atelier_review",
-            description: "Review a task's worktree changes for correctness then cleanups.",
+            description: "Review a completed worker's worktree against the base branch and classify every issue by severity (Atelier's Opus reviewer).",
             arguments: [
                 PromptArg(name: "task_title", description: "Task title.", required: true, defaultValue: ""),
-                PromptArg(name: "task_description", description: "Task description.", required: false, defaultValue: ""),
+                PromptArg(name: "task_description", description: "Task brief/description.", required: false, defaultValue: "(no description)"),
                 PromptArg(name: "base_branch", description: "Base branch to diff against.", required: false, defaultValue: "main"),
             ],
             template: """
-            Review the worktree changes for task “{{task_title}}” against base branch {{base_branch}}.
+            You are reviewing a feature branch a worker just completed, checked out in the current directory (its git worktree). The task it was given:
 
-            TASK:
+            Title: {{task_title}}
+            Brief:
+            \"\"\"
             {{task_description}}
+            \"\"\"
 
-            Focus on correctness bugs first, then reuse/simplification/efficiency. Verify the tests actually exercise the change and were not weakened. Return a JSON object: {"summary","findings":[{"severity","file","detail"}],"approved":bool}.
+            Inspect the ACTUAL change: run `git diff {{base_branch}}...HEAD` and read changed files as needed to see exactly what changed vs the base branch. Judge whether it correctly and completely does what the task asked, and whether it's safe to merge.
+
+            Classify EVERY issue by severity:
+            - critical: wrong behavior, crash, data loss, security hole, or a broken build/tests.
+            - major: a stated acceptance criterion unmet, a real edge-case bug, a meaningful perf regression, or required tests missing.
+            - minor: style, naming, small non-functional improvements.
+            - cosmetic: formatting / whitespace / comment phrasing.
+
+            Output ONLY this JSON object — no prose, no fences:
+            {
+              "verdict": "APPROVE | CHANGES_REQUESTED | NEEDS_DISCUSSION",
+              "summary": "1-3 sentence overall assessment",
+              "findings": [
+                {"severity":"critical","file":"path/file.swift","line":42,"summary":"what is wrong","suggested_fix":"what to change"}
+              ]
+            }
+            Use [] for findings when the change is clean. Quote REAL file paths/lines from the diff.
             """),
         PromptDef(
             name: "atelier_synthesize_feature",
-            description: "Synthesize the feature deliverable and confirm it answers the original demand.",
+            description: "Write the FINAL synthesis for a fully-merged feature: judge the whole feature against the demand and split behavior into machine-guaranteed vs human-verified.",
             arguments: [
-                PromptArg(name: "demand", description: "Original demand/spec.", required: true, defaultValue: ""),
-                PromptArg(name: "acceptance_criteria", description: "Acceptance criteria.", required: false, defaultValue: ""),
-                PromptArg(name: "changed_files", description: "Changed files.", required: false, defaultValue: ""),
-                PromptArg(name: "test_summary", description: "Test summary.", required: false, defaultValue: ""),
+                PromptArg(name: "demand", description: "The feature demand (union of merged tasks' briefs).", required: true, defaultValue: "(no briefs)"),
+                PromptArg(name: "acceptance_criteria", description: "Aggregated acceptance criteria (verbatim, one per line).", required: false, defaultValue: "(none stated)"),
+                PromptArg(name: "changed_files", description: "Changed files.", required: false, defaultValue: "(none)"),
+                PromptArg(name: "test_summary", description: "Integration test suite summary.", required: false, defaultValue: "(not run)"),
                 PromptArg(name: "coverage", description: "Coverage summary.", required: false, defaultValue: "not measured"),
-                PromptArg(name: "coverage_target", description: "Soft coverage target.", required: false, defaultValue: "90"),
+                PromptArg(name: "base_branch", description: "Base branch to diff against.", required: false, defaultValue: "main"),
                 PromptArg(name: "build_status", description: "Build status.", required: false, defaultValue: "n/a"),
+                PromptArg(name: "review_rollup", description: "Per-task review rollup.", required: false, defaultValue: "(none)"),
             ],
             template: """
-            Synthesize the feature deliverable. Confirm the built feature answers the ORIGINAL demand.
+            You are writing the FINAL synthesis for a feature an autopilot just built across several tasks, all merged into the integration branch checked out in the current directory. Judge the WHOLE feature against the demand, and split user-visible behavior into what's already guaranteed by code/tests vs. what a human must verify by hand.
 
-            DEMAND:
+            Inspect the ACTUAL integrated change: run `git diff {{base_branch}}...HEAD` and read the changed files, so your judgments describe the REAL behavior — not boilerplate.
+
+            THE FEATURE DEMAND (union of the merged tasks' briefs):
+            \"\"\"
             {{demand}}
-
-            ACCEPTANCE CRITERIA:
+            \"\"\"
+            Aggregated acceptance criteria (verbatim):
             {{acceptance_criteria}}
 
-            CHANGED FILES:
-            {{changed_files}}
+            WHAT THE MACHINE ALREADY VERIFIED (facts — do not contradict):
+            - Integration test suite: {{test_summary}}
+            - Coverage: {{coverage}}
+            - Build: {{build_status}}
+            - Changed files: {{changed_files}}
+            - Per-task review rollup: {{review_rollup}}
 
-            TEST SUMMARY: {{test_summary}}
-            COVERAGE: {{coverage}} (soft target {{coverage_target}}%)
-            BUILD: {{build_status}}
-
-            Return a JSON object: {"featureTitle","summary","answersTheDemand":bool,"conformityRationale","gaps":[]}.
+            Output ONLY this JSON object — no prose, no fences:
+            {
+              "feature_title": "<= 8 words naming the feature",
+              "summary": "one paragraph: what was implemented across the tasks, in plain technical language",
+              "answers_the_demand": true,
+              "conformity_rationale": "1-3 sentences: does the integrated work satisfy the demand? what, if anything, is missing",
+              "gaps": ["any required aspect of the demand not (fully) met — empty if fully met"],
+              "criteria": [{"text":"<verbatim criterion>","coverage":"automated|partial|manual","evidence":"which test guarantees it, or why only a human can judge it"}],
+              "manual_checks": [{"category":"ui|device|integration|visual|performance|accessibility|security|edgeCase|dataMigration","title":"behavior a human must exercise","how_to":"numbered steps in the running app","why":"why code/tests can't guarantee this"}]
+            }
+            manual_checks = the FEATURE recette: keep only what code/tests cannot guarantee (perceptual, interactive, real-device, performance, accessibility, end-to-end). EXCLUDE anything a passing test or the type system already guarantees.
             """),
     ]
 

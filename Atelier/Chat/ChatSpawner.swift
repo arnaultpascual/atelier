@@ -37,8 +37,7 @@ final class ChatSpawner {
               allowWeb: Bool = false,
               allowFileEdit: Bool = false,
               contextPath: String? = nil,
-              extraDirs: [String] = [],
-              featureId: String? = nil) {
+              extraDirs: [String] = []) {
         guard !isBusy(roomId: room.id) else { return }
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -62,8 +61,7 @@ final class ChatSpawner {
                                allowWeb: allowWeb,
                                allowFileEdit: allowFileEdit,
                                contextPath: contextPath,
-                               extraDirs: extraDirs,
-                               featureId: featureId)
+                               extraDirs: extraDirs)
         }
     }
 
@@ -75,8 +73,7 @@ final class ChatSpawner {
                          allowWeb: Bool = false,
                          allowFileEdit: Bool = false,
                          contextPath: String? = nil,
-                         extraDirs: [String] = [],
-                         featureId: String? = nil) async {
+                         extraDirs: [String] = []) async {
         // Ensure the scratch dir exists (user may have nuked it).
         var isDir: ObjCBool = false
         if !FileManager.default.fileExists(atPath: room.scratchPath, isDirectory: &isDir) || !isDir.boolValue {
@@ -116,27 +113,12 @@ final class ChatSpawner {
         let toolsOn = allowWeb || allowFiles || allowFileEdit
         let agentId = UUID()
 
-        // MCP capability layer for the brief stage (feature-scoped, behind the
-        // kill-switch). Additive: any failure → continue without MCP. Chat runs
-        // bypassPermissions so there's no approval hook to compose with.
-        var mcpConfigURL: URL? = nil
-        var mcpBridge: AtelierBridgeListener? = nil
-        if MCPCapability.isEnabled, let featureId,
-           let projectPath = store.featureByID(featureId).flatMap({ store.projectByID($0.projectId) })?.path {
-            let bridge = AtelierBridgeListener(agentId: agentId.uuidString, featureId: featureId,
-                                               projectPath: projectPath, store: store)
-            do {
-                let sock = try await bridge.start()
-                mcpConfigURL = try MCPServerConfig.writeTemporaryConfig(
-                    agentId: agentId, socketPath: sock, featureId: featureId,
-                    taskId: nil, projectPath: projectPath)
-                mcpBridge = bridge
-            } catch {
-                logger.warning("mcp capability (brief chat) setup failed, continuing without: \(error.localizedDescription, privacy: .public)")
-                await bridge.stop(reason: "mcp setup failed"); mcpConfigURL = nil; mcpBridge = nil
-            }
-        }
-
+        // NB: the brief chat is deliberately NOT given the MCP capability layer.
+        // In the brief stage Claude is the SOLE writer of brief.md (it edits the
+        // file directly, `allowFileEdit`), so attaching the app-side brief_* write
+        // tools here would create a two-writer race on the same file. The MCP
+        // brief_* / spec_record_finding tools live in the feature BUILD spawns
+        // (TaskSpawner), where there is no competing direct editor.
         let runner = WorkerRunner()
         let invocation = WorkerRunner.Invocation(
             prompt: promptText,
@@ -152,8 +134,7 @@ final class ChatSpawner {
             chatAllowWeb: allowWeb,
             chatAllowFiles: allowFiles,
             chatAllowFileEdit: allowFileEdit,
-            inputStreamJSON: imageEvent,
-            mcpConfigPath: mcpConfigURL?.path
+            inputStreamJSON: imageEvent
         )
 
         let liveTurn = turn
@@ -198,10 +179,6 @@ final class ChatSpawner {
                 turn.lastErrorMessage = error.localizedDescription
             }
         }
-
-        // Tear down the MCP capability bridge for this turn.
-        if let mcpConfigURL { MCPServerConfig.cleanup(mcpConfigURL) }
-        if let mcpBridge { await mcpBridge.stop(reason: "chat turn finished") }
 
         // Persist cumulative totals back into the room. Pull the latest title
         // first so we don't clobber an auto-title (or user rename) that landed
