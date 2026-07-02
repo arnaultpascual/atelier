@@ -118,6 +118,35 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
         .init(tool: "Bash", pattern: "re:^(ls|pwd|cat|head|tail|wc|find|tree|file|stat)( |$)", behavior: .allow, reason: "Read-only POSIX inspection", scope: .profile),
     ]
 
+    // Shared Python toolchain (plain python + django + fastapi): pytest gate + coverage.py.
+    private static let pythonRules: [PermissionRule] = [
+        .init(tool: "Bash", pattern: "re:^(ruff|mypy|pytest|black|isort|coverage)( |$)", behavior: .allow, reason: "Python lint/test/coverage toolchain", scope: .profile),
+        .init(tool: "Bash", pattern: "re:^python3? -m (pytest|mypy|ruff|coverage)( |$)", behavior: .allow, reason: "Python module invocations", scope: .profile),
+        .init(tool: "Bash", pattern: "re:^python3? manage\\.py (test|check|migrate|makemigrations)( |$)", behavior: .allow, reason: "Django manage.py", scope: .profile),
+    ]
+    private static let pythonBuild = BuildConfig(
+        buildCommand: nil,
+        testCommands: [.init(id: "unit", label: "pytest", command: "pytest", tier: .fast, requiresDevice: false)],
+        testScaffoldingHint: "Unit tests run with `pytest` — write the failing test FIRST. Tests live in tests/ or as test_*.py / *_test.py. If there's no test setup, create tests/ and ensure pytest is available. Django: pytest needs DJANGO_SETTINGS_MODULE (pytest-django); if unconfigured, `python manage.py test` is the fallback runner.",
+        testDiscoveryGlobs: ["**/test_*.py", "**/*_test.py", "**/tests/**/*.py"],
+        requiredTools: [
+            .init(id: "python", label: "Python 3", probe: .executable("python3"),
+                  installHint: "Install Python 3 (python3 must be runnable).", required: true),
+            .init(id: "pytest", label: "pytest", probe: .executable("pytest"),
+                  installHint: "Install pytest (`pip install pytest`) — the gate runs `pytest`. If it lives in a venv, activate it so `pytest` resolves.", required: true),
+        ],
+        coverageCommand: "pytest --cov --cov-report=xml",
+        coverageSetup: .init(
+            probeFiles: ["pyproject.toml", "setup.cfg", "pytest.ini", ".coveragerc", "tox.ini", "requirements.txt", "requirements-dev.txt"],
+            markers: ["pytest-cov", "pytest_cov", "--cov", "coverage.py", "[tool.coverage", "[coverage:run]"],
+            toolName: "pytest-cov",
+            instructions: """
+            Wire coverage.py so tests emit a Cobertura XML report. Do this and NOTHING else — no app/test code changes.
+            - Add pytest-cov to the project's dev dependencies (pyproject `[project.optional-dependencies]`/`[tool.poetry.group.dev.dependencies]`, or requirements-dev.txt), so `pytest --cov` works.
+            - Verify: `pytest --cov --cov-report=xml` exits 0 and writes `coverage.xml` (Cobertura) at the project root.
+            - Commit ONLY the dependency/config change.
+            """))
+
     static let catalog: [ProjectProfile] = [
         .init(
             id: "swift-apple",
@@ -157,16 +186,34 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
             ]
         ),
         .init(
+            id: "django",
+            name: "Django",
+            iconSystemName: "cube.transparent",
+            defaultModel: "claude-sonnet-4-6",
+            suggestedLabels: ["python", "django", "web"],
+            description: "Django web project — manage.py plus a `django` dependency.",
+            defaultRules: baseReadOnlyRules + pythonRules,
+            build: pythonBuild
+        ),
+        .init(
+            id: "fastapi",
+            name: "FastAPI",
+            iconSystemName: "bolt.horizontal",
+            defaultModel: "claude-sonnet-4-6",
+            suggestedLabels: ["python", "fastapi", "api"],
+            description: "FastAPI service — a `fastapi` dependency in pyproject.toml / requirements.",
+            defaultRules: baseReadOnlyRules + pythonRules,
+            build: pythonBuild
+        ),
+        .init(
             id: "python",
             name: "Python",
             iconSystemName: "chevron.left.forwardslash.chevron.right",
             defaultModel: "claude-sonnet-4-6",
             suggestedLabels: ["python", "backend"],
-            description: "pyproject.toml, setup.py, or requirements.txt.",
-            defaultRules: baseReadOnlyRules + [
-                .init(tool: "Bash", pattern: "re:^(ruff|mypy|pytest|black|isort)( |$)", behavior: .allow, reason: "Python lint/test toolchain", scope: .profile),
-                .init(tool: "Bash", pattern: "re:^python -m (pytest|mypy|ruff)( |$)", behavior: .allow, reason: "Python module invocations", scope: .profile),
-            ]
+            description: "pyproject.toml, setup.py, setup.cfg, requirements.txt, or Pipfile.",
+            defaultRules: baseReadOnlyRules + pythonRules,
+            build: pythonBuild
         ),
         .init(
             id: "rust",

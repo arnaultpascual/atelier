@@ -56,11 +56,22 @@ enum ProjectProfileDetector {
             return (profile(id: "node-backend"), ["package.json"])
         }
 
-        // Python
-        let pyMarkers = ["pyproject.toml", "setup.py", "requirements.txt", "Pipfile"]
+        // Python — django / fastapi sub-types first (need a dependency-manifest sniff),
+        // then plain python as the fallback.
+        let pyMarkers = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"]
         let pyHits = pyMarkers.filter(set.contains)
-        if !pyHits.isEmpty {
-            return (profile(id: "python"), pyHits)
+        if !pyHits.isEmpty || set.contains("manage.py") {
+            let manifests = ["pyproject.toml", "requirements.txt", "requirements-dev.txt", "Pipfile", "setup.cfg"]
+                .filter(set.contains).map { readText(url, $0) }.joined(separator: "\n")
+            // Django: manage.py (strong signal) or a `django` dependency.
+            if set.contains("manage.py") || manifests.contains("django") {
+                return (profile(id: "django"), pyHits + (set.contains("manage.py") ? ["manage.py"] : []))
+            }
+            // FastAPI: a `fastapi` dependency.
+            if manifests.contains("fastapi") {
+                return (profile(id: "fastapi"), pyHits + ["fastapi"])
+            }
+            if !pyHits.isEmpty { return (profile(id: "python"), pyHits) }
         }
 
         // Rust
@@ -84,6 +95,13 @@ enum ProjectProfileDetector {
 
     private static func profile(id: String) -> ProjectProfile {
         ProjectProfile.find(id: id) ?? ProjectProfile.generic
+    }
+
+    /// Reads a top-level file's contents (bounded, lowercased) for dependency sniffing.
+    /// Returns "" if absent/unreadable.
+    private static func readText(_ root: URL, _ name: String) -> String {
+        guard let data = try? Data(contentsOf: root.appendingPathComponent(name)) else { return "" }
+        return String(decoding: data.prefix(200_000), as: UTF8.self).lowercased()
     }
 
     private static func isCodeFile(_ name: String) -> Bool {
