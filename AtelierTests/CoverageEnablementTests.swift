@@ -44,6 +44,14 @@ final class CoverageEnablementTests: XCTestCase {
         XCTAssertEqual(CoverageEnablement.status(profile: .generic, projectPath: p), .notSupported)
     }
 
+    func testRustGoCoverageWiredByDefaultNoRepoSetup() throws {
+        // Coverage is a global tool (cargo-llvm-cov / gocover-cobertura), not repo config:
+        // a coverageCommand with no coverageSetup reports .wired (no misleading prereq callout).
+        let p = try tempProject(["Cargo.toml": "[package]"])
+        XCTAssertEqual(CoverageEnablement.status(profile: ProjectProfile.find(id: "rust")!, projectPath: p), .wired)
+        XCTAssertEqual(CoverageEnablement.status(profile: ProjectProfile.find(id: "go")!, projectPath: p), .wired)
+    }
+
     func testMarkerInsidePrunedBuildDirDoesNotCount() throws {
         // A generated build.gradle under build/ must not be mistaken for real wiring.
         let p = try tempProject([

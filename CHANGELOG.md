@@ -41,6 +41,21 @@ All notable changes to Atelier are documented here. The format is based on
     record findings on discovered constraints, and check coverage before finishing. Without this the
     capability sat dormant (tools present but unprompted).
 
+- **More project typologies, with real TDD gates + coverage** — the strict-TDD gate + coverage
+  previously existed only for Android and .NET; now the common code modes are fully wired:
+  - **Django** and **FastAPI** (new) — detected ahead of plain Python (manage.py / `django` /
+    `fastapi` dependency sniff); pytest gate + coverage.py (`pytest --cov` → Cobertura).
+  - **Python** (completed) — was detection-only; now a real pytest gate + pytest-cov coverage.
+  - **React (Vite)** (new) — React + TypeScript on Vite (not Next); the package.json detector fork
+    now orders next → react+vite → other-frontend → node.
+  - **Node.js / Next.js** (completed) — `npm test` gate + Vitest coverage setup.
+  - **Rust** (`cargo test` + cargo-llvm-cov→lcov) and **Go** (`go test` + gocover-cobertura→Cobertura)
+    completed; their coverage tools are global (surfaced in the toolchain preflight, no repo wiring).
+  - The autopilot's coverage-improvement round + dossier now read coverage **multi-format**
+    (Cobertura / LCOV / JaCoCo / json-summary), not just Cobertura — so coverage is data-driven
+    across all these modes, matching the MCP `coverage_get` tool. (Swift and a TS-library mode are
+    intentionally deferred — SwiftPM/Xcode duality and heuristic overlap respectively.)
+
 - **Coverage tooling enablement (prerequisites)** — the feature-flow Prerequisites step now detects
   whether the project has coverage tooling wired for its mode and, if not, offers a **one-time,
   opt-in** setup (its own commit) so `coverage_get` / the dossier have a real report to read. Per

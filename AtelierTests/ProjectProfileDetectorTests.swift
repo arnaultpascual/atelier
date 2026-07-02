@@ -80,4 +80,14 @@ final class ProjectProfileDetectorTests: XCTestCase {
             XCTAssertNotNil(p.build.coverageSetup, "\(id) coverageSetup")
         }
     }
+
+    func testRustAndGoHaveGateAndCoverageCommandButNoRepoSetup() {
+        for id in ["rust", "go"] {
+            let p = ProjectProfile.find(id: id)!
+            XCTAssertFalse(p.build.fastTestCommands.isEmpty, "\(id) gate")
+            XCTAssertNotNil(p.build.coverageCommand, "\(id) coverageCommand")
+            XCTAssertNil(p.build.coverageSetup, "\(id) coverage is a global tool, no repo setup")
+            XCTAssertEqual(p.build.coverageTarget, 90, "\(id) soft target")
+        }
+    }
 }

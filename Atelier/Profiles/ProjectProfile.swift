@@ -257,8 +257,23 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
             suggestedLabels: ["rust", "systems"],
             description: "Cargo.toml at the project root.",
             defaultRules: baseReadOnlyRules + [
-                .init(tool: "Bash", pattern: "re:^cargo (check|build|test|clippy|fmt|tree)( |$)", behavior: .allow, reason: "Standard cargo subcommands", scope: .profile),
-            ]
+                .init(tool: "Bash", pattern: "re:^cargo (check|build|test|clippy|fmt|tree|llvm-cov)( |$)", behavior: .allow, reason: "Standard cargo subcommands", scope: .profile),
+            ],
+            build: .init(
+                buildCommand: "cargo build",
+                testCommands: [.init(id: "unit", label: "cargo test", command: "cargo test", tier: .fast, requiresDevice: false)],
+                testScaffoldingHint: "Rust unit tests live in `#[cfg(test)] mod tests` blocks next to the code; integration tests in tests/. Run with `cargo test` — write the failing test FIRST.",
+                testDiscoveryGlobs: ["**/tests/**/*.rs", "**/src/**/*.rs"],
+                requiredTools: [
+                    .init(id: "cargo", label: "Cargo (Rust)", probe: .executable("cargo"),
+                          installHint: "Install Rust via rustup (https://rustup.rs) — cargo must be runnable.", required: true),
+                    .init(id: "cargo-llvm-cov", label: "cargo-llvm-cov (coverage, optional)", probe: .executable("cargo-llvm-cov"),
+                          installHint: "Optional for coverage: `cargo install cargo-llvm-cov` + `rustup component add llvm-tools-preview`.", required: false),
+                ],
+                // Coverage is a global toolchain component (cargo-llvm-cov), not repo config —
+                // no coverageSetup wiring; emits lcov, read by the multi-format parser.
+                coverageCommand: "cargo llvm-cov --lcov --output-path lcov.info"
+            )
         ),
         .init(
             id: "go",
@@ -270,7 +285,23 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
             defaultRules: baseReadOnlyRules + [
                 .init(tool: "Bash", pattern: "re:^go (build|test|vet|fmt|mod|run|env)( |$)", behavior: .allow, reason: "Standard go subcommands", scope: .profile),
                 .init(tool: "Bash", pattern: "re:^gofmt ", behavior: .allow, reason: "gofmt", scope: .profile),
-            ]
+                .init(tool: "Bash", pattern: "re:^gocover-cobertura( |<|$)", behavior: .allow, reason: "Go coverage → Cobertura", scope: .profile),
+            ],
+            build: .init(
+                buildCommand: "go build ./...",
+                testCommands: [.init(id: "unit", label: "go test", command: "go test ./...", tier: .fast, requiresDevice: false)],
+                testScaffoldingHint: "Go tests are *_test.go files beside the code (func TestXxx(t *testing.T)); run with `go test ./...` — write the failing test FIRST.",
+                testDiscoveryGlobs: ["**/*_test.go"],
+                requiredTools: [
+                    .init(id: "go", label: "Go toolchain", probe: .executable("go"),
+                          installHint: "Install Go (https://go.dev/dl) — `go` must be runnable.", required: true),
+                    .init(id: "gocover-cobertura", label: "gocover-cobertura (coverage, optional)", probe: .executable("gocover-cobertura"),
+                          installHint: "Optional for coverage: `go install github.com/boumenot/gocover-cobertura@latest` (converts Go's coverprofile to Cobertura).", required: false),
+                ],
+                // Go's native coverprofile isn't parseable — convert to Cobertura via gocover-cobertura
+                // (a global tool, not repo config → no coverageSetup).
+                coverageCommand: "go test ./... -coverprofile=coverage.out -covermode=atomic && gocover-cobertura < coverage.out > coverage.xml"
+            )
         ),
         .init(
             id: "android-kotlin",
