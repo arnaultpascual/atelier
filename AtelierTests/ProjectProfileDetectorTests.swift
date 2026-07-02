@@ -37,6 +37,17 @@ final class ProjectProfileDetectorTests: XCTestCase {
         XCTAssertEqual(try detectID(["pyproject.toml": "[project]\ndependencies = [\"requests\"]\n"]), "python")
     }
 
+    func testFastApiUtilsSubstringIsNotFastApi() throws {
+        // Token-boundary: a substring/transitive dep must not trigger fastapi.
+        XCTAssertEqual(try detectID(["requirements.txt": "fastapi-utils==0.2\nflask\n"]), "python")
+    }
+    func testDjangoSubpackageAloneIsNotDjango() throws {
+        XCTAssertEqual(try detectID(["requirements.txt": "django-cors-headers==4\nflask\n"]), "python")
+    }
+    func testRealDjangoDepStillDetected() throws {
+        XCTAssertEqual(try detectID(["requirements.txt": "Django==5.0\ndjango-cors-headers==4\n"]), "django")
+    }
+
     func testDjangoWinsOverFastAPIWhenBoth() throws {
         // manage.py present + fastapi also listed → django (checked first).
         XCTAssertEqual(try detectID(["manage.py": "x", "requirements.txt": "django\nfastapi\n"]), "django")

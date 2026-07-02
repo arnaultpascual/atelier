@@ -99,6 +99,17 @@ final class CoverageReportTests: XCTestCase {
         XCTAssertEqual(CoverageReport.find(in: base.path)?.percent, 75)
     }
 
+    func testReportInsideVenvIsPruned() throws {
+        // A stale/foreign coverage report inside a venv must not be picked as newest.
+        let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("cov-\(UUID().uuidString)")
+        let venv = base.appendingPathComponent("venv/lib/site-packages")
+        try FileManager.default.createDirectory(at: venv, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        try #"<coverage line-rate="0.99"></coverage>"#
+            .write(to: venv.appendingPathComponent("coverage.xml"), atomically: true, encoding: .utf8)
+        XCTAssertNil(CoverageReport.find(in: base.path))   // only report is under venv → ignored
+    }
+
     func testMalformedReturnsNil() {
         XCTAssertNil(CoverageReport.parseCobertura("<coverage>no rate</coverage>"))
         XCTAssertNil(CoverageReport.parseLcov("garbage"))

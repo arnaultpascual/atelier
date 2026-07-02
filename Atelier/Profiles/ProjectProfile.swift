@@ -61,6 +61,10 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
 
         /// The effective soft coverage aim: the explicit `coverageTargetPct`, else 90% when the mode
         /// can measure coverage at all (`coverageCommand != nil`), else nil (mode can't measure it).
+        /// NB: this drives the ≥90% aim woven into decompose/worker/synthesis prompts, so it's nil for
+        /// modes that only have a `coverageSetup` (JS, Android) until coverage is wired+run. The MCP
+        /// `coverage_get` tool nudge is a flat "≥90%" regardless — an intentional, minor divergence:
+        /// prompt-woven aim is command-gated; the live tool always encourages coverage.
         var coverageTarget: Int? { coverageTargetPct ?? (coverageCommand != nil ? 90 : nil) }
 
         /// Commands that gate review/merge by default — fast, no device required.

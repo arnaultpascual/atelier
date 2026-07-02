@@ -40,7 +40,10 @@ struct CoverageReport: Equatable {
     ]
     // NB: ".build" (SwiftPM) is pruned but "build" is NOT — Android/Gradle JaCoCo
     // reports live under build/reports/jacoco/…, which must remain discoverable.
-    private static let prunedDirs: Set<String> = ["bin", "obj", "node_modules", ".git", ".build", "DerivedData"]
+    // venv/target/vendor are pruned so a STALE or foreign coverage report bundled by a
+    // dependency (or left in a virtualenv) can't be picked as the newest-by-mtime.
+    private static let prunedDirs: Set<String> = ["bin", "obj", "node_modules", ".git", ".build", "DerivedData",
+                                                  ".venv", "venv", "env", "site-packages", "target", "vendor", ".tox", ".pytest_cache"]
 
     /// Finds the newest known coverage report under `dir` and parses it.
     static func find(in dir: String) -> CoverageReport? {
@@ -68,7 +71,7 @@ struct CoverageReport: Equatable {
         let fm = FileManager.default
         guard let en = fm.enumerator(at: URL(fileURLWithPath: dir),
                                      includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
-                                     options: []) else { return nil }
+                                     options: [.skipsHiddenFiles]) else { return nil }
         var best: (path: String, date: Date)? = nil
         let baseDepth = URL(fileURLWithPath: dir).standardizedFileURL.pathComponents.count
         for case let url as URL in en {

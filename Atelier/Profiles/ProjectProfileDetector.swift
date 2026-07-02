@@ -71,12 +71,13 @@ enum ProjectProfileDetector {
         if !pyHits.isEmpty || set.contains("manage.py") {
             let manifests = ["pyproject.toml", "requirements.txt", "requirements-dev.txt", "Pipfile", "setup.cfg"]
                 .filter(set.contains).map { readText(url, $0) }.joined(separator: "\n")
-            // Django: manage.py (strong signal) or a `django` dependency.
-            if set.contains("manage.py") || manifests.contains("django") {
+            // Django: manage.py (strong signal) or a `django` dependency (token-boundary
+            // match, so `django-cors-headers` / a comment substring don't false-trigger).
+            if set.contains("manage.py") || mentionsDependency(manifests, "django") {
                 return (profile(id: "django"), pyHits + (set.contains("manage.py") ? ["manage.py"] : []))
             }
-            // FastAPI: a `fastapi` dependency.
-            if manifests.contains("fastapi") {
+            // FastAPI: a `fastapi` dependency (boundary match rejects `fastapi-utils` etc).
+            if mentionsDependency(manifests, "fastapi") {
                 return (profile(id: "fastapi"), pyHits + ["fastapi"])
             }
             if !pyHits.isEmpty { return (profile(id: "python"), pyHits) }
@@ -110,6 +111,16 @@ enum ProjectProfileDetector {
     private static func readText(_ root: URL, _ name: String) -> String {
         guard let data = try? Data(contentsOf: root.appendingPathComponent(name)) else { return "" }
         return String(decoding: data.prefix(200_000), as: UTF8.self).lowercased()
+    }
+
+    /// True if `text` (already lowercased) names `dep` at a dependency-token boundary — so
+    /// `fastapi` matches `fastapi==0.1` / a bare line but NOT `fastapi-utils`, and `django`
+    /// matches a real dep but not `django-cors-headers`.
+    private static func mentionsDependency(_ text: String, _ dep: String) -> Bool {
+        guard let re = try? NSRegularExpression(pattern: "(^|[^a-z0-9_.-])\(dep)([^a-z0-9_.-]|$)") else {
+            return text.contains(dep)
+        }
+        return re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
     }
 
     private static func isCodeFile(_ name: String) -> Bool {

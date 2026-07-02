@@ -192,7 +192,9 @@ enum DossierBuilder {
         // Multi-format: Cobertura (dotnet/python/go), LCOV (rust/swift/node), JaCoCo (android/JVM),
         // json-summary (node) — whichever the mode's coverage command emitted into the worktree.
         guard let report = CoverageReport.find(in: worktreePath) else { return nil }
-        return "lines \(report.percent)%"
+        // One-decimal so the informational verdict doesn't flip across the rounding boundary
+        // (e.g. 89.6% shouldn't read as "90%").
+        return String(format: "lines %.1f%%", report.lineRate * 100)
     }
 
     /// Numeric line-rate (0…1) from the newest coverage report already written under `worktreePath`
