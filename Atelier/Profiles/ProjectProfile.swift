@@ -227,7 +227,9 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
                 ],
                 coverageSetup: .init(
                     probeFiles: ["build.gradle", "build.gradle.kts"],
-                    markers: ["jacoco"],
+                    // Specific plugin-application / config tokens, not the bare word — a comment
+                    // mentioning "jacoco" must NOT read as wired.
+                    markers: ["id(\"jacoco\")", "id 'jacoco'", "apply plugin: 'jacoco'", "apply plugin: \"jacoco\"", "jacoco {"],
                     toolName: "JaCoCo",
                     instructions: """
                     Wire JaCoCo code coverage into this Android/Gradle project so a coverage XML report is produced for the JVM unit tests. Do this and NOTHING else — do not touch app code or existing tests.
@@ -263,7 +265,7 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
                 ],
                 coverageCommand: "dotnet test --nologo --collect:\"XPlat Code Coverage\"",
                 coverageSetup: .init(
-                    probeFiles: [".csproj", ".fsproj"],
+                    probeFiles: [".csproj", ".fsproj", "Directory.Build.props", "Directory.Packages.props"],
                     markers: ["coverlet.collector", "coverlet.msbuild"],
                     toolName: "coverlet",
                     instructions: """

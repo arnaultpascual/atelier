@@ -35,19 +35,23 @@ enum CoverageEnablement {
         guard !markers.isEmpty, !setup.probeFiles.isEmpty else { return false }
         let pruned: Set<String> = ["build", "bin", "obj", "node_modules", ".git", ".gradle", ".idea", "DerivedData", ".build"]
         let fm = FileManager.default
-        guard let en = fm.enumerator(at: URL(fileURLWithPath: projectPath),
-                                     includingPropertiesForKeys: nil,
+        let root = URL(fileURLWithPath: projectPath).standardizedFileURL
+        let rootDepth = root.pathComponents.count
+        guard let en = fm.enumerator(at: root, includingPropertiesForKeys: nil,
                                      options: [.skipsHiddenFiles]) else { return false }
-        var scanned = 0
+        var visited = 0
         for case let url as URL in en {
-            if url.pathComponents.contains(where: { pruned.contains($0) }) { en.skipDescendants(); continue }
+            // Prune only components BELOW the project root — a project living under a dir
+            // literally named build/bin/.build/… must not prune itself away (false 'missing').
+            let rel = url.standardizedFileURL.pathComponents.dropFirst(rootDepth)
+            if rel.contains(where: { pruned.contains($0) }) { en.skipDescendants(); continue }
+            visited += 1
+            if visited > 20_000 { break }   // pathological-tree guard; the match below short-circuits
             let name = url.lastPathComponent
             guard setup.probeFiles.contains(where: { name.hasSuffix($0) }) else { continue }
             guard let raw = try? String(contentsOf: url, encoding: .utf8) else { continue }
             let text = raw.lowercased()
             if markers.contains(where: { text.contains($0) }) { return true }
-            scanned += 1
-            if scanned > 500 { break }   // safety bound on huge trees
         }
         return false
     }

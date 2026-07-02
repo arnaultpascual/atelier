@@ -53,6 +53,31 @@ final class CoverageEnablementTests: XCTestCase {
         XCTAssertEqual(CoverageEnablement.status(profile: android(), projectPath: p), .missing(tool: "JaCoCo"))
     }
 
+    func testAndroidCommentMentionOfJacocoIsNotWired() throws {
+        // A bare "jacoco" mention in a comment must not read as wired (needs plugin application).
+        let p = try tempProject(["app/build.gradle.kts": "// TODO: add jacoco later\nplugins { id(\"com.android.application\") }"])
+        XCTAssertEqual(CoverageEnablement.status(profile: android(), projectPath: p), .missing(tool: "JaCoCo"))
+    }
+
+    func testProjectUnderPrunedAncestorDirStillDetected() throws {
+        // Project physically under a dir literally named "build" must not prune itself away.
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("build").appendingPathComponent("proj-\(UUID().uuidString)")
+        let f = base.appendingPathComponent("app/build.gradle.kts")
+        try FileManager.default.createDirectory(at: f.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "plugins { id(\"jacoco\") }".write(to: f, atomically: true, encoding: .utf8)
+        addTeardownBlock { try? FileManager.default.removeItem(at: base.deletingLastPathComponent()) }
+        XCTAssertEqual(CoverageEnablement.status(profile: android(), projectPath: base.path), .wired)
+    }
+
+    func testDotnetWiredViaDirectoryBuildProps() throws {
+        let p = try tempProject([
+            "Directory.Build.props": "<Project><ItemGroup><PackageReference Include=\"coverlet.collector\" /></ItemGroup></Project>",
+            "Sut.Tests/Sut.Tests.csproj": "<Project></Project>",
+        ])
+        XCTAssertEqual(CoverageEnablement.status(profile: dotnet(), projectPath: p), .wired)
+    }
+
     func testSetupInstructionsPresentForSupportedModes() {
         XCTAssertNotNil(CoverageEnablement.setupInstructions(profile: android()))
         XCTAssertTrue(CoverageEnablement.setupInstructions(profile: android())!.contains("jacocoTestReport"))

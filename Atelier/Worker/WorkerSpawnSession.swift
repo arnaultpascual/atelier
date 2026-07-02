@@ -49,13 +49,16 @@ struct WorkerSpawnSession {
                       autopilot: Bool,
                       mcpFeatureId: String?,
                       mcpTaskId: String?,
-                      store: AppStore) async throws -> WorkerSpawnSession {
+                      store: AppStore,
+                      extraDenyRules: [PermissionRule] = []) async throws -> WorkerSpawnSession {
         let listener = ApprovalSocketListener(agentId: agentId.uuidString,
                                               taskId: approvalTaskId,
                                               projectName: project.name,
                                               queue: approvalQueue)
         let socketPath = try await listener.start()
         approvalQueue.loadRules(forAgent: agentId.uuidString, project: project, worktreePath: rulesWorktreePath)
+        // Hard fences (deny) that must win even under autopilot auto-accept.
+        approvalQueue.prependRunRules(forAgent: agentId.uuidString, extraDenyRules)
         if autopilot { approvalQueue.setAutopilot(true, forAgent: agentId.uuidString) }
 
         let settingsURL: URL

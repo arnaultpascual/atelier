@@ -198,22 +198,27 @@ struct FeatureFlowView: View {
     /// Coverage-tooling enablement: when the mode supports coverage but it isn't wired,
     /// offer a one-time, opt-in setup so `coverage_get` / the dossier have a real report.
     @ViewBuilder private var coverageCallout: some View {
-        if let note = coverageNote {
-            CalloutBanner(.info, note)
-        } else if wiringCoverage {
+        if wiringCoverage {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.mini)
                 Text("Wiring coverage tooling…").font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
             }
-        } else if case .missing(let tool)? = coverageStatus {
-            VStack(alignment: .leading, spacing: 8) {
-                CalloutBanner(.info, "Coverage isn't configured for this \(profile.name) project. Wire \(tool) so the build can measure coverage vs the soft 90% aim (data-driven TDD). Optional — it never blocks you.")
-                Button {
-                    wireCoverage()
-                } label: {
-                    Label("Wire \(tool) coverage", systemImage: "chart.bar.doc.horizontal")
+        } else {
+            // Note (success / "commit first" / failure) shown above; the Wire button
+            // stays reachable as long as coverage is still missing (retry-safe).
+            if let note = coverageNote { CalloutBanner(.info, note) }
+            if case .missing(let tool)? = coverageStatus {
+                VStack(alignment: .leading, spacing: 8) {
+                    if coverageNote == nil {
+                        CalloutBanner(.info, "Coverage isn't configured for this \(profile.name) project. Wire \(tool) so the build can measure coverage vs the soft 90% aim (data-driven TDD). Optional — it never blocks you.")
+                    }
+                    Button {
+                        wireCoverage()
+                    } label: {
+                        Label("Wire \(tool) coverage", systemImage: "chart.bar.doc.horizontal")
+                    }
+                    .buttonStyle(.borderedProminent).controlSize(.small)
                 }
-                .buttonStyle(.borderedProminent).controlSize(.small)
             }
         }
     }
@@ -786,7 +791,8 @@ struct FeatureFlowView: View {
     }
 
     private func loadCoverageStatus() async {
-        guard viewedStage == .prerequisites else { coverageStatus = nil; return }
+        guard viewedStage == .prerequisites else { coverageStatus = nil; coverageNote = nil; return }
+        coverageNote = nil   // drop any stale success/failure note on (re)entry so the button returns
         let profile = self.profile
         let path = project.path
         // Bounded filesystem scan — keep it off the main actor.
@@ -804,16 +810,30 @@ struct FeatureFlowView: View {
 
         \(instructions)
 
-        Do ONLY the above — do not modify application code or existing tests. When done, `git add` the changed config files and `git commit` them with a clear message. Do NOT push, merge, or rebase.
+        Do ONLY the above — do not modify application code or existing tests. Stage ONLY the specific files you changed, by path; do NOT run `git add -A`, `git add .`, or `git commit -am`, and do NOT push, merge, or rebase. Then `git commit` with a clear message.
         """
+        // Hard fence (enforced, not just prompt text): this foreground worker runs on the
+        // user's real branch, so deny any history/remote mutation even under auto-accept.
+        let denyGitWrite = [PermissionRule(tool: "Bash",
+                                           pattern: "re:^git (push|merge|rebase|reset)( |$)",
+                                           behavior: .deny,
+                                           reason: "Coverage setup must never push/merge/rebase your branch",
+                                           scope: .run)]
         Task { @MainActor in
+            // Refuse on a dirty tree so the setup commit can't sweep unrelated work in.
+            let clean = (try? await GitService.isClean(projectPath: project.path)) ?? false
+            guard clean else {
+                wiringCoverage = false
+                coverageNote = "Your working tree has uncommitted changes — commit or stash them first, then wire coverage so the setup lands in its own clean commit."
+                return
+            }
             let outcome = await spawner.runManagedWorker(
                 label: "coverage-setup", prompt: prompt, workingDirectory: project.path,
                 project: project, model: ModelRouter.latestOpus, apiKey: APIKeyResolver.resolve(),
                 store: store, server: server, approvalQueue: approvalQueue, maxTurns: 40,
-                featureId: live.id)
+                featureId: live.id, extraDenyRules: denyGitWrite)
             wiringCoverage = false
-            await loadCoverageStatus()
+            await loadCoverageStatus()   // clears any prior note, re-probes
             if case .wired? = coverageStatus {
                 coverageNote = "Coverage tooling wired ✓ — committed to this branch."
             } else if outcome.completed {

@@ -70,6 +70,15 @@ final class ApprovalQueue {
         perAgentProject[agentId] = project
     }
 
+    /// Prepends run-scoped rules for an agent (call AFTER `loadRules`). Because
+    /// `enqueue` evaluates the rule list (step 2) BEFORE the autopilot auto-accept
+    /// fallthrough (step 2.5), a `.deny` rule here HARD-blocks a tool even for an
+    /// autopilot agent — used to fence a one-shot setup worker off git push/merge/rebase.
+    func prependRunRules(forAgent agentId: String, _ rules: [PermissionRule]) {
+        guard !rules.isEmpty else { return }
+        perAgentRules[agentId, default: []].insert(contentsOf: rules, at: 0)
+    }
+
     func unloadRules(forAgent agentId: String) {
         perAgentRules.removeValue(forKey: agentId)
         perAgentContext.removeValue(forKey: agentId)

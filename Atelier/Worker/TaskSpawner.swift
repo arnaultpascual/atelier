@@ -166,7 +166,8 @@ final class TaskSpawner {
                           server: ApprovalServer,
                           approvalQueue: ApprovalQueue,
                           maxTurns: Int = 60,
-                          featureId: String? = nil) async -> ManagedOutcome {
+                          featureId: String? = nil,
+                          extraDenyRules: [PermissionRule] = []) async -> ManagedOutcome {
         let profile = ProjectProfile.find(id: project.profileId) ?? .generic
         let agentId = UUID()
         let session: WorkerSpawnSession
@@ -174,7 +175,8 @@ final class TaskSpawner {
             session = try await WorkerSpawnSession.begin(
                 agentId: agentId, approvalTaskId: "feature-synthesis", project: project,
                 rulesWorktreePath: workingDirectory, server: server, approvalQueue: approvalQueue,
-                autopilot: true, mcpFeatureId: featureId, mcpTaskId: nil, store: store)
+                autopilot: true, mcpFeatureId: featureId, mcpTaskId: nil, store: store,
+                extraDenyRules: extraDenyRules)
         } catch {
             logger.error("managed worker session failed: \(error.localizedDescription, privacy: .public)")
             return ManagedOutcome(completed: false, costUsd: 0, looksUsageLimited: false)
