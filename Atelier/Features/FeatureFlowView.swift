@@ -35,6 +35,7 @@ struct FeatureFlowView: View {
     @State private var decomposeActivity: String?   // latest live step (repo-inspect path emits these)
     @State private var decomposeStart: Date?        // for the elapsed timer while decomposing
     @State private var buildCmdDraft = ""           // inline entry for the optional app-build command
+    @State private var reasonPopoverTaskID: String? // which blocked card's "why" popover is open
     @State private var inspectRepo = true
     @State private var quickAddTitle = ""
     // ⑤ Finish
@@ -575,20 +576,22 @@ struct FeatureFlowView: View {
                         }
                     }
                 }
-                // Blocked: show the one-line reason (when still in memory) + a link to the full
-                // report on disk (gradle/compiler output etc.) — survives relaunch, unlike the reason.
+                // Blocked: a concise "why" (popover — the full report is one click deeper) and a
+                // one-tap "I fixed it → unblock & re-run".
                 if t.status == .blocked {
-                    if let reason = store.taskBlockedReason[t.id], !reason.isEmpty {
-                        Text(reason).font(.system(size: 9))
-                            .foregroundStyle(Palette.error).lineLimit(2)
-                    }
-                    let report = URL(fileURLWithPath: project.path)
-                        .appendingPathComponent(".atelier/autopilot/\(t.id).md")
-                    if FileManager.default.fileExists(atPath: report.path) {
-                        Button("Voir le rapport →") { NSWorkspace.shared.open(report) }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(Color.atelierAccent)
+                    HStack(spacing: 12) {
+                        Button { reasonPopoverTaskID = t.id } label: {
+                            Label("Pourquoi bloqué ?", systemImage: "questionmark.circle").font(.system(size: 9, weight: .medium))
+                        }
+                        .buttonStyle(.plain).foregroundStyle(Palette.error)
+                        .popover(isPresented: Binding(get: { reasonPopoverTaskID == t.id },
+                                                      set: { if !$0 { reasonPopoverTaskID = nil } })) {
+                            blockedReasonPopover(t)
+                        }
+                        Button { unblockAndResume(t) } label: {
+                            Label("Débloquer & relancer", systemImage: "arrow.clockwise").font(.system(size: 9, weight: .medium))
+                        }
+                        .buttonStyle(.plain).foregroundStyle(Color.atelierAccent)
                     }
                 }
             }
@@ -940,6 +943,45 @@ struct FeatureFlowView: View {
                 }
             } catch {
                 await MainActor.run { finalizing = false; mergeError = error.localizedDescription }
+            }
+        }
+    }
+
+    /// Concise "why is this blocked" — the block reason (readable, selectable), with the full
+    /// report (build/compiler output) one click deeper. Lighter than opening the report outright.
+    @ViewBuilder
+    private func blockedReasonPopover(_ t: AtelierTask) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("BLOQUÉ — POURQUOI").font(AtelierFont.eyebrow.weight(.semibold)).foregroundStyle(Palette.error)
+            ScrollView {
+                Text(store.taskBlockedReason[t.id] ?? "Raison non conservée (après un relaunch). Le rapport garde le détail complet.")
+                    .font(AtelierFont.caption).foregroundStyle(Color.atelierInk)
+                    .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 180)
+            let report = URL(fileURLWithPath: project.path).appendingPathComponent(".atelier/autopilot/\(t.id).md")
+            if FileManager.default.fileExists(atPath: report.path) {
+                Divider()
+                Button("Voir le rapport complet (sortie build) →") { NSWorkspace.shared.open(report) }
+                    .buttonStyle(.plain).font(AtelierFont.eyebrow).foregroundStyle(Color.atelierAccent)
+            }
+        }
+        .padding(14).frame(width: 340)
+    }
+
+    /// "I fixed it" — reset a blocked task to To Do (clearing its block), then re-run the autopilot.
+    /// The re-run cuts a fresh integration branch off the current HEAD (which carries all prior
+    /// merges), so the now-runnable task + any dependents that waited on it build on the accumulated
+    /// foundation rather than from scratch.
+    private func unblockAndResume(_ t: AtelierTask) {
+        reasonPopoverTaskID = nil
+        Task {
+            try? await store.updateTaskStatus(t, to: .toDo)
+            await store.clearBlockedReason(taskId: t.id)
+            await store.clearProgress(taskId: t.id)
+            await MainActor.run {
+                featureRunner.clearRun(featureId: feature.id)
+                startFeatureAutopilot(store.tasks(inFeature: feature.id))
             }
         }
     }
