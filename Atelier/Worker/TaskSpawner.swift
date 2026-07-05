@@ -20,10 +20,14 @@ final class TaskSpawner {
         runs[taskId]
     }
 
-    /// Returns true if the task has a run in a non-terminal state.
+    /// Returns true if the task has a run in a non-terminal state — OR one that is
+    /// still in its post-run tail (TDD gate + teardown). The gate can run for minutes
+    /// (JVM/.NET) after the agent status flips to `.completed`; without the `isFinishing`
+    /// window a concurrent iterate would reuse the same session paths and the finishing
+    /// run's teardown would unlink the live iterate's sockets (silently disabling approvals).
     func hasLiveWorker(for taskId: String) -> Bool {
         guard let run = runs[taskId] else { return false }
-        return !run.agent.status.isTerminal
+        return !run.agent.status.isTerminal || run.isFinishing
     }
 
     /// Drop the cached run (used when user dismisses the agent view to go back to
@@ -270,6 +274,10 @@ final class TaskSpawner {
         if task.status != .inProgress && task.status != .done {
             try? await store.updateTaskStatus(task, to: .inProgress)
         }
+        // Clear any stale block reason from a PRIOR run now we're re-attempting. (We no longer
+        // clear it at teardown — a reason set by this run's `task_signal_blocked` must survive so
+        // the card and the deliverable can show it.)
+        await store.clearBlockedReason(taskId: task.id)
 
         // 4/5. Per-spawn scaffolding: approval socket + settings hook + (optional,
         //      feature-scoped) MCP capability bridge — one object, one teardown.
@@ -369,8 +377,15 @@ final class TaskSpawner {
         //    The worker is done; now Atelier runs the mode's test command in the
         //    worktree and gates on the exit code. Red → the task stays In Progress
         //    with a summary of why; green (or a mode with no test command) → Review.
+        //    Mark the run "finishing" so hasLiveWorker stays true through the gate+teardown.
+        run.isFinishing = true
         if run.agent.status == .completed {
-            if let latest = store.taskByID(task.id), latest.status == .inProgress {
+            // Gate on .inProgress OR .review: a worker can self-promote to Review via MCP
+            // (`task_update_status`), and that must NOT skip the gate — Atelier runs the tests
+            // itself and is the authority. Read the COMMITTED row (the worker just wrote it).
+            // A deliberately .blocked task is left alone.
+            let latest = await store.freshTask(task.id)
+            if let latest, latest.status == .inProgress || latest.status == .review {
                 var gated = latest
                 if profile.build.fastTestCommands.isEmpty {
                     gated.testState = .noTests
@@ -409,8 +424,10 @@ final class TaskSpawner {
                                 gated.testIntegrity = .suspect   // advisory; user can "Review test changes"
                             }
                         }
-                        if result.passed { gated.status = .review }
-                        // red → stays In Progress; the tests tab / card badge shows why.
+                        // green → Review; red → pull back to In Progress even if the worker
+                        // self-promoted to Review (red must never sit in Review). The tests
+                        // tab / card badge shows why.
+                        gated.status = result.passed ? .review : .inProgress
                     }
                     run.statusHint = ""
                 }
@@ -424,9 +441,11 @@ final class TaskSpawner {
 
         // 10. Tear down the per-spawn scaffolding (socket + settings + MCP).
         await session.tearDown(reason: "worker finished")
-        // Drop the transient live-progress badge + block reason now the build phase is over.
+        // Drop the transient live-progress badge now the build phase is over. The block
+        // reason is intentionally KEPT (cleared at the next spawn's start) so a task that
+        // signalled blocked shows its reason on the card and in the deliverable.
         await store.clearProgress(taskId: task.id)
-        await store.clearBlockedReason(taskId: task.id)
+        run.isFinishing = false
     }
 
     /// Re-spawns a worker that `--resume`s a prior claude session for the given
@@ -489,11 +508,16 @@ final class TaskSpawner {
                                 server: ApprovalServer,
                                 approvalQueue: ApprovalQueue,
                                 autopilot: Bool = false) async {
-        let agentUUID = UUID(uuidString: run.agent.id) ?? UUID()
+        // FRESH per-spawn session identity — decoupled from the resumed agent's DB id. Reusing
+        // run.agent.id keyed the sockets/settings/mcp-config on the agent, so an iterate that
+        // overlapped the prior run's finishing tail bound the SAME paths, and the old run's
+        // teardown then unlinked this session's live sockets. A fresh UUID can't collide.
+        let sessionUUID = UUID()
+        await store.clearBlockedReason(taskId: task.id)   // re-attempting: drop a stale reason
         let session: WorkerSpawnSession
         do {
             session = try await WorkerSpawnSession.begin(
-                agentId: agentUUID, approvalTaskId: task.id, project: project,
+                agentId: sessionUUID, approvalTaskId: task.id, project: project,
                 rulesWorktreePath: worktreePath, server: server, approvalQueue: approvalQueue,
                 autopilot: autopilot, mcpFeatureId: task.featureId, mcpTaskId: task.id, store: store)
         } catch {
@@ -512,7 +536,7 @@ final class TaskSpawner {
             prompt: iterateMessage,
             model: run.agent.model,
             apiKey: apiKey,
-            agentId: agentUUID,
+            agentId: sessionUUID,
             settingsPath: session.settingsPath,
             workingDirectory: worktreePath,
             additionalDirs: [project.path],
@@ -561,12 +585,14 @@ final class TaskSpawner {
         if !run.agent.status.isTerminal {
             run.agent.status = finalStatus
         }
+        run.isFinishing = true
         run.agent.endedAt = Date()
         try? await store.updateAgent(run.agent)
 
         await session.tearDown(reason: "iterate finished")
+        // Keep any block reason this pass recorded (cleared at the next spawn's start).
         await store.clearProgress(taskId: task.id)
-        await store.clearBlockedReason(taskId: task.id)
+        run.isFinishing = false
     }
 
     private func finalize(run: ActiveRun, status: Agent.Status, store: AppStore) {
@@ -694,6 +720,10 @@ final class ActiveRun {
     var state: AgentState
     var workerTask: Task<Void, Never>?
     var statusHint: String
+    /// True during the post-run tail (TDD gate + teardown), after the agent status is
+    /// terminal but before the session is torn down. Keeps `hasLiveWorker` true so no
+    /// concurrent spawn reuses this run's session resources.
+    var isFinishing = false
 
     init(taskId: String, model: String) {
         self.taskId = taskId

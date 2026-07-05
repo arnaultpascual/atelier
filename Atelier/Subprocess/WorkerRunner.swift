@@ -212,6 +212,12 @@ actor WorkerRunner {
         for (key, value) in invocation.extraEnv {
             if let k = Environment.Key(rawValue: key) { envOverrides[k] = value }
         }
+        // When the MCP capability layer is attached, give MCP tool calls a generous timeout:
+        // `review_request` runs a full Opus review (minutes). claude's default tool timeout would
+        // fire mid-review, orphaning the app-side work; 10 min covers it. (extraEnv wins if set.)
+        if invocation.mcpConfigPath != nil, let k = Environment.Key(rawValue: "MCP_TOOL_TIMEOUT"), envOverrides[k] == nil {
+            envOverrides[k] = "600000"
+        }
         let environment: Environment = .inherit.updating(envOverrides)
 
         logger.info("Spawning claude at \(claudePath, privacy: .public) model=\(invocation.model, privacy: .public) cwd=\(invocation.workingDirectory, privacy: .public)")

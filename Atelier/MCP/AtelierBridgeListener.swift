@@ -26,6 +26,10 @@ actor AtelierBridgeListener {
     private var clientFD: Int32 = -1
     private var acceptTask: Task<Void, Never>?
     private(set) var socketPath: String?
+    /// Tasks with a `review_request` Opus review currently running — guards against a
+    /// worker (e.g. after a client-side MCP timeout) stacking a second review of the same
+    /// worktree while the first is still going (minutes-long, costly).
+    private var reviewsInFlight: Set<String> = []
 
     init(agentId: String, featureId: String, projectPath: String, store: AppStore) {
         self.agentId = agentId
@@ -82,6 +86,12 @@ actor AtelierBridgeListener {
         while !Task.isCancelled, fd >= 0 {
             let cfd = await Task.detached { Darwin.accept(fd, nil, nil) }.value
             if Task.isCancelled || cfd < 0 { break }
+            // Writing to a socket whose peer died would raise SIGPIPE (default disposition
+            // kills the whole app). SO_NOSIGPIPE turns that into an EPIPE errno on write.
+            var on: Int32 = 1
+            setsockopt(cfd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+            // Close any prior client before adopting the new one (no fd leak on reconnect).
+            if clientFD >= 0 { close(clientFD) }
             self.clientFD = cfd
             await readLoop(clientFD: cfd)
         }
@@ -108,7 +118,12 @@ actor AtelierBridgeListener {
 
     private func handleLine(_ line: Data, clientFD: Int32) async {
         guard let request = try? MCPCodec.decoder.decode(BridgeRequest.self, from: line) else {
+            // Reply with an error rather than nothing — the worker's `SocketBridge.send`
+            // blocks in readLine with no timeout, so silence would hang it (one framing
+            // bug away from a stuck worker). id unknown → null.
             Self.logger.warning("malformed bridge request")
+            // id unknown; SocketBridge.send matches by position (next line), so any reply unblocks it.
+            respond(clientFD: clientFD, response: .failure(id: "", error: "malformed bridge request"))
             return
         }
         let response = await handle(request)
@@ -116,6 +131,9 @@ actor AtelierBridgeListener {
     }
 
     private func respond(clientFD: Int32, response: BridgeResponse) {
+        // The connection may have been replaced/closed while a long op (e.g. review_request)
+        // ran; writing to the stale fd could hit a recycled descriptor. Only write to the live one.
+        guard clientFD == self.clientFD, clientFD >= 0 else { return }
         guard var data = try? MCPCodec.encoder.encode(response) else { return }
         data.append(0x0A)
         var rest = data
@@ -133,6 +151,18 @@ actor AtelierBridgeListener {
             return .failure(id: req.id, error: "app store unavailable")
         }
         let featureId = self.featureId
+        // Scope fence: a worker may only act on tasks in ITS feature. taskId is caller-supplied
+        // (arguments["taskId"] ?? context.taskId), so without this an confused/hostile worker
+        // could flip a sibling wave task or another project's task. A not-found taskId falls
+        // through to the handler's precise "not found"; an out-of-feature task is rejected here.
+        if let tid = req.taskId, !tid.isEmpty {
+            switch await store.freshTask(tid) {
+            case .none: break
+            case .some(let t) where t.featureId == featureId: break
+            case .some:
+                return .failure(id: req.id, error: "task \(tid) is not part of this feature — out of scope")
+            }
+        }
         switch req.op {
         case "task_report_progress":
             guard let taskId = req.taskId, !taskId.isEmpty else {
@@ -207,28 +237,32 @@ actor AtelierBridgeListener {
 
     // MARK: brief building (Phase 2)
 
+    private enum BriefMutationOutcome { case ok(String); case noDoc; case badArgs; case writeFailed(String) }
+
     private func handleBriefMutation(_ op: String, _ req: BridgeRequest, store: AppStore) async -> BridgeResponse {
         let featureId = self.featureId
-        let resolved: (url: URL, roomId: String)? = await MainActor.run {
+        // The ENTIRE read-modify-write runs on @MainActor: MainActor is the single serialization
+        // point, so parallel wave workers can't interleave a lost-update race on brief.md (both
+        // read v1, both write, one finding lost). The brief is a small markdown file — main-thread
+        // I/O here is cheap and correctness beats shaving microseconds.
+        let outcome: BriefMutationOutcome = await MainActor.run {
             guard let feature = store.featureByID(featureId),
                   let roomId = feature.briefRoomId,
-                  let room = store.chatRoom(id: roomId) else { return nil }
-            return (room.briefFileURL, roomId)
+                  let room = store.chatRoom(id: roomId) else { return .noDoc }
+            let url = room.briefFileURL
+            var doc = BriefDocument.parse(Self.readBriefFile(url))
+            guard let message = Self.applyBriefOp(op, args: req.args, to: &doc) else { return .badArgs }
+            do { try doc.rendered().write(to: url, atomically: true, encoding: .utf8) }
+            catch { return .writeFailed(error.localizedDescription) }
+            store.bumpBriefRevision(roomId: roomId)
+            return .ok(message)
         }
-        guard let (url, roomId) = resolved else {
-            return .failure(id: req.id, error: "no brief document for feature \(featureId)")
+        switch outcome {
+        case .ok(let message): return .success(id: req.id, result: msg(message))
+        case .noDoc: return .failure(id: req.id, error: "no brief document for feature \(featureId)")
+        case .badArgs: return .failure(id: req.id, error: "invalid arguments for \(op)")
+        case .writeFailed(let e): return .failure(id: req.id, error: "could not write brief: \(e)")
         }
-        var doc = BriefDocument.parse(Self.readBriefFile(url))
-        guard let message = Self.applyBriefOp(op, args: req.args, to: &doc) else {
-            return .failure(id: req.id, error: "invalid arguments for \(op)")
-        }
-        do {
-            try doc.rendered().write(to: url, atomically: true, encoding: .utf8)
-        } catch {
-            return .failure(id: req.id, error: "could not write brief: \(error.localizedDescription)")
-        }
-        await MainActor.run { store.bumpBriefRevision(roomId: roomId) }
-        return .success(id: req.id, result: msg(message))
     }
 
     /// Pure brief-op dispatcher (unit-tested). Returns an ack message, or nil on
@@ -363,6 +397,13 @@ actor AtelierBridgeListener {
         guard let worktree = (try? await store.agentsForTask(taskId))?.first?.worktreePath, !worktree.isEmpty else {
             return .failure(id: req.id, error: "no worktree for task \(taskId) yet — nothing to review")
         }
+        // A review is minutes-long; if the worker's client timed out and retried, don't stack a
+        // second Opus review of the same worktree. One in flight per task.
+        guard !reviewsInFlight.contains(taskId) else {
+            return .failure(id: req.id, error: "a review for \(taskId) is already running — wait for it to finish")
+        }
+        reviewsInFlight.insert(taskId)
+        defer { reviewsInFlight.remove(taskId) }
         let fid = self.featureId
         let base = await MainActor.run { store.featureByID(fid)?.integrationBranch } ?? "main"
         let key = await MainActor.run { APIKeyResolver.resolve() }

@@ -216,7 +216,7 @@ struct AddProjectSheet: View {
             VStack(alignment: .leading, spacing: 4) {
                 bulletRow("Create", "backlog/config.yml + backlog/tasks/ + backlog/archive/")
                 bulletRow("Create", ".atelier/config.yml")
-                bulletRow("Append", "`.atelier-worktrees/` and `.atelier/audit.jsonl` to .gitignore")
+                bulletRow("Append", "`.atelier-worktrees/` and `.atelier/*` (keeps config.yml) to .gitignore")
                 bulletRow("Skip", "anything that already exists — never overwrites your files")
             }
             Text("Convention: tasks are markdown files under `backlog/tasks/<id>.md` — fully compatible with the `backlog` CLI from MrLesk/Backlog.md.")

@@ -7,7 +7,7 @@ import os
 /// Creates:
 /// - `backlog/config.yml` + `backlog/tasks/` + `backlog/archive/` (Backlog.md compatible)
 /// - `.atelier/config.yml`
-/// - appends `.atelier-worktrees/` and `.atelier/audit.jsonl` to `.gitignore`
+/// - appends `.atelier-worktrees/` and `.atelier/*` (keeping `.atelier/config.yml`) to `.gitignore`
 ///
 /// Refuses to scaffold a path that isn't a directory. Idempotent: re-running on a
 /// scaffolded project is a no-op for files that already exist (we never overwrite).
@@ -82,11 +82,15 @@ enum ProjectScaffolder {
 
         // .gitignore amendments
         let gitignore = root.appendingPathComponent(".gitignore")
+        // Ignore all of `.atelier/` (machine state: worktrees, audit log, attachments,
+        // autopilot reports, test-change declarations) EXCEPT the committable project config.
+        // `.atelier/*` (not `.atelier/`) leaves the dir includable so the negation can re-add config.
         let added = try ensureGitignoreLines(at: gitignore, lines: [
             "",
             "# Atelier",
             ".atelier-worktrees/",
-            ".atelier/audit.jsonl"
+            ".atelier/*",
+            "!.atelier/config.yml"
         ])
 
         return Report(created: created, alreadyPresent: alreadyPresent, gitignoreLinesAdded: added)

@@ -81,6 +81,44 @@ All notable changes to Atelier are documented here. The format is based on
     disable). A missing/unreachable server degrades to the pure file+git contract. New `AtelierTests`
     unit-test target added. Design + Phase 0 verification in `docs/mcp-capability.md`.
 
+### Fixed
+
+- **Strict-TDD gate is now authoritative even when a worker self-promotes.** A worker calling
+  `task_update_status → Review` over MCP no longer skips the post-run test gate: Atelier runs the
+  mode's tests regardless and pulls a red task back to In Progress (green → Review). The manual /
+  board-spawn path had no second net before this.
+- **`task_signal_blocked` is now visible and honest.** The block reason survives the worker's
+  teardown (cleared at the next spawn instead), so it shows on the card; the autopilot reflects an
+  MCP-signalled block as a `.blocked` phase (was a phantom, permanent "building" spinner) and the
+  deliverable lists it. Autopilot-internal blocks now also show their reason on the card.
+- **Bridge mutations are feature-scoped.** A worker can only act on tasks in its own feature —
+  a caller-supplied `taskId` for a sibling wave task or another project is rejected (was unscoped).
+- **No more SIGPIPE app-kills / stale-fd writes.** `SIGPIPE` is ignored process-wide (app + MCP
+  server), accepted sockets set `SO_NOSIGPIPE`, `respond` only writes to the live client fd, the
+  prior client fd is closed on reconnect, and a malformed bridge request now gets an error reply
+  (was silence → a hung worker).
+- **Iterate no longer disables approvals.** A resumed (iterate) worker uses a fresh per-spawn
+  session identity, and a finishing run stays "live" through its test gate + teardown — so an
+  overlapping iterate can't reuse the same socket paths and have the old run's teardown unlink the
+  live session's approval socket (which silently turned auto-approve fully permissive).
+- **`review_request` hardened.** MCP tool calls get a 10-min timeout when the layer is attached (a
+  minutes-long Opus review no longer trips the default), and a second review of the same task is
+  refused while one is in flight.
+- **Parallel workers can't lose each other's brief findings.** All `brief_*` / `spec_record_finding`
+  writes to `brief.md` are serialized on the main actor (was an interleavable read-modify-write).
+- **Coverage wiring is reliable.** It's refused while a build is running on the project, the
+  clean-tree guard ignores untracked files (Atelier's own artifacts / a prior `FEATURE-*.md` no
+  longer falsely block it), and scaffolding now gitignores all of `.atelier/` (keeping `config.yml`).
+- **"Merge & finish" merges into the right branch.** The feature persists its base branch, so
+  finishing merges the integration branch INTO that base (was a no-op self-merge that still marked
+  the feature completed) — and works after an app relaunch. Schema migration `v13` (additive).
+- **No more dead ends:** stuck In-Progress tasks after a mid-build relaunch can be reset to To Do
+  from the Build stage; an unreadable deliverable shows an error instead of an eternal spinner; a
+  failed brief-workspace setup surfaces with a Retry.
+- **Live progress on the main board.** Task cards on the project board show the MCP progress % and
+  the block reason (previously only the feature-flow kanban did).
+- Routing warnings are keyed by feature (no longer leak across features/projects).
+
 ## [1.0.0-alpha.5] — 2026-07-01
 
 Two headline features: a **.NET (C#) mode**, and a **feature-centric guided flow** that walks a

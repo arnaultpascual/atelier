@@ -236,10 +236,15 @@ final class FeatureBuildRunner {
                 run.integrationBranch = integration
                 run.originalBase = base        // remember where we branched from
                 run.baseBranch = integration   // task worktrees branch off this; merges land here
-                // Link the integration branch back to the feature so the flow's finish stage finds it.
+                // Link the integration branch + its base back to the feature so the flow's finish
+                // stage can merge into the RIGHT branch (the run is in-memory; this survives relaunch).
                 if let fid = run.featureId {
                     let branch = integration
-                    try? await deps.store.updateFeature(id: fid) { $0.integrationBranch = branch }
+                    let originalBase = base
+                    try? await deps.store.updateFeature(id: fid) {
+                        $0.integrationBranch = branch
+                        $0.baseBranch = originalBase
+                    }
                 }
             } else {
                 // Resume (e.g. after a usage-limit pause): the feature branch already exists.
@@ -342,10 +347,20 @@ final class FeatureBuildRunner {
             }
             return
         }
+        // A worker can signal blocked via MCP mid-build (status → .blocked). Reflect that in the
+        // run: set the .blocked phase (capturing the reason) so the card shows Blocked with a
+        // reason and the deliverable lists it — otherwise the phase stays .building forever (a
+        // phantom spinner) and the block is invisible to the dossier.
+        guard let latest = await deps.store.freshTask(task.id) else { return }
+        if latest.status == .blocked {
+            let reason = deps.store.taskBlockedReason[task.id] ?? "worker signalled blocked"
+            run.taskPhases[task.id] = .blocked(reason: reason)
+            return
+        }
         // The shared TDD gate (TaskSpawner.execute) promoted the task to .review iff its tests
         // passed. If it stayed In Progress, tests are red — fix them within the cap so red tasks
         // don't silently stall outside Phase B (which only picks up .review tasks).
-        guard let latest = deps.store.taskByID(task.id), latest.status == .inProgress else { return }
+        guard latest.status == .inProgress else { return }
         let profile = modeProfile(deps)
         guard !profile.build.fastTestCommands.isEmpty else {
             // No test command but somehow unpromoted — promote it so Phase B can review it.
@@ -850,6 +865,9 @@ final class FeatureBuildRunner {
         logger.warning("autopilot blocked \(task.id, privacy: .public): \(reason, privacy: .public)")
         writeAutopilotReport(task: task, project: deps.project, report: run.reportByTask[task.id], outcome: "Blocked — \(reason)")
         run.taskPhases[task.id] = .blocked(reason: reason)
+        // Mirror the reason onto the card too (same ephemeral channel MCP blocks use), so the
+        // kanban shows WHY every blocked task is blocked — not just autopilot-internal reports.
+        deps.store.setBlockedReason(taskId: task.id, reason: reason)
         // Preserve the task's just-written testState/testIntegrity by mutating the COMMITTED row
         // (the observation cache lags and would clobber e.g. .regressed back to .green).
         if var latest = await deps.store.freshTask(task.id) {

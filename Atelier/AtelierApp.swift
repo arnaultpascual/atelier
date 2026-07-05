@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+import Darwin
 import SwiftUI
 
 @main
@@ -9,6 +10,13 @@ struct AtelierApp: App {
     @State private var approvalQueue = ApprovalQueue()
     @State private var chatSpawner = ChatSpawner()
     @State private var featureRunner = FeatureBuildRunner()
+
+    init() {
+        // Writing to a Unix-socket whose peer died (a killed worker's MCP/approval helper)
+        // would raise SIGPIPE, whose default disposition terminates the whole app. Ignore it
+        // process-wide — the socket write loops already handle the EPIPE/EOF return.
+        signal(SIGPIPE, SIG_IGN)
+    }
 
     var body: some Scene {
         // Primary 3-column shell. The title bar is hidden so our cream background

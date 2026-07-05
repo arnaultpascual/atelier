@@ -39,13 +39,15 @@ enum MCPCapability {
         """
     }
 
-    /// Guidance for the managed synthesis / coverage-improvement worker running on
-    /// a feature's integration branch.
+    /// Guidance for a managed (task-less) worker scoped to a feature — synthesis, the
+    /// coverage-improvement round, or the coverage-tooling setup. Deliberately does NOT
+    /// assert which branch you're on (synthesis runs on the integration branch; the
+    /// prerequisites coverage-setup runs on the user's own branch).
     static func managedWorkerGuidance(featureId: String) -> String {
         """
         ## Atelier tools
 
-        You're operating on this feature's integration branch. Use Atelier's MCP tools:
+        You're working on this feature. Use Atelier's MCP tools:
         - Read `atelier://feature/\(featureId)/spec` and judge the integrated work against the ORIGINAL demand.
         - Call `mcp__atelier__coverage_get` and `mcp__atelier__coverage_uncovered` to see coverage vs the soft 90% aim and exactly which files still need tests — target those files.
         - Record any discovered constraint or workaround with `mcp__atelier__spec_record_finding`.

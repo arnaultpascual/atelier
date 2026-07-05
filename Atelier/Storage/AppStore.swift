@@ -62,9 +62,12 @@ final class AppStore {
 
     /// Ephemeral warnings from the last `createTasks` attachment routing (unmatched
     /// decomposer-assigned names, failed copies, ambiguous duplicate basenames) —
-    /// surfaced in the tasks UI so a task can never silently lose its mockup.
-    /// Reset on every `createTasks` call; not persisted.
-    private(set) var attachmentRoutingWarnings: [String] = []
+    /// surfaced in the tasks UI so a task can never silently lose its mockup. Keyed by
+    /// featureId (the loose Fill-Kanban flow uses ""), so a decompose in one feature can't
+    /// clobber the banner another feature is showing. Reset per key on each `createTasks`.
+    private(set) var attachmentRoutingWarnings: [String: [String]] = [:]
+    /// Routing warnings from the most recent decompose into `featureId` (empty if none).
+    func attachmentWarnings(featureId: String) -> [String] { attachmentRoutingWarnings[featureId] ?? [] }
 
     private var observationTask: Task<Void, Never>?
 
@@ -527,7 +530,7 @@ final class AppStore {
         if !warnings.isEmpty {
             logger.warning("attachment routing: \(warnings.joined(separator: " | "), privacy: .public)")
         }
-        attachmentRoutingWarnings = warnings   // reset (possibly to empty) every run
+        attachmentRoutingWarnings[featureId ?? ""] = warnings   // reset this scope's warnings every run
         return created.map(\.task)
     }
 

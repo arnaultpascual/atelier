@@ -31,7 +31,9 @@ struct FeatureFlowView: View {
     @State private var inspectRepo = true
     @State private var quickAddTitle = ""
     // ⑤ Finish
+    @State private var briefRoomError: String?
     @State private var deliverableMarkdown: String?
+    @State private var deliverableUnreadable = false
     @State private var finalizing = false
     @State private var mergeError: String?
 
@@ -78,8 +80,15 @@ struct FeatureFlowView: View {
     /// Reload the deliverable when we enter Finish or when the synthesis writes/updates its path.
     private var deliverableLoadKey: String { "\(viewedStage.rawValue)|\(live.deliverablePath ?? "")" }
     private func loadDeliverable() {
-        guard viewedStage == .finish, let path = live.deliverablePath else { deliverableMarkdown = nil; return }
-        deliverableMarkdown = try? String(contentsOfFile: path, encoding: .utf8)
+        guard viewedStage == .finish, let path = live.deliverablePath else {
+            deliverableMarkdown = nil; deliverableUnreadable = false; return
+        }
+        if let md = try? String(contentsOfFile: path, encoding: .utf8) {
+            deliverableMarkdown = md; deliverableUnreadable = false
+        } else {
+            // Path recorded but the file is gone/unreadable — surface it instead of an eternal spinner.
+            deliverableMarkdown = nil; deliverableUnreadable = true
+        }
     }
 
     // MARK: Header + stepper
@@ -232,6 +241,12 @@ struct FeatureFlowView: View {
                     .frame(height: 600)
                     .background(Color.atelierSurface.opacity(0.25), in: RoundedRectangle(cornerRadius: AtelierCorner.card))
                     .overlay(RoundedRectangle(cornerRadius: AtelierCorner.card).stroke(Color.atelierDivider, lineWidth: 1))
+            } else if let err = briefRoomError {
+                VStack(spacing: 10) {
+                    CalloutBanner(.danger, "Couldn't set up the brief workspace: \(err)")
+                    Button("Retry") { Task { await ensureBriefRoomIfNeeded() } }.controlSize(.small)
+                }
+                .frame(maxWidth: .infinity, minHeight: 200)
             } else {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
@@ -296,8 +311,9 @@ struct FeatureFlowView: View {
                 if let err = decomposeError { CalloutBanner(.danger, err) }
                 // Attachment-routing warnings from the last decompose (unmatched names,
                 // failed copies) — a task must never silently lose its mockup.
-                if !store.attachmentRoutingWarnings.isEmpty {
-                    CalloutBanner(.warning, store.attachmentRoutingWarnings.joined(separator: "\n"))
+                let routingWarnings = store.attachmentWarnings(featureId: feature.id)
+                if !routingWarnings.isEmpty {
+                    CalloutBanner(.warning, routingWarnings.joined(separator: "\n"))
                 }
             }
             advanceBar(primaryTitle: "Continue to Build", canAdvance: !featureTasks.isEmpty)
@@ -433,12 +449,20 @@ struct FeatureFlowView: View {
                 }
             } else {
                 let projectBusy = featureRunner.isProjectBusy(project.id)
+                // Tasks left mid-flight (e.g. app quit during a build — runs are in-memory and gone
+                // on relaunch) sit .inProgress with no run, so nothing is runnable and Start is
+                // disabled: a dead end without this reset.
+                let stuck = featureTasks.filter { $0.status == .inProgress }
                 Image(systemName: "infinity").foregroundStyle(Color.atelierAccent)
                 Text(projectBusy ? "Another build is running for this project — one at a time (they share the repo)."
-                     : (runnable.isEmpty ? "No runnable task — add tasks in the Tasks stage."
-                                         : "\(featureTasks.count) task\(featureTasks.count == 1 ? "" : "s") ready to build."))
+                     : (!stuck.isEmpty ? "\(stuck.count) task\(stuck.count == 1 ? " was" : "s were") left mid-build (e.g. after a relaunch). Reset \(stuck.count == 1 ? "it" : "them") to re-run."
+                        : (runnable.isEmpty ? "No runnable task — add tasks in the Tasks stage."
+                                            : "\(featureTasks.count) task\(featureTasks.count == 1 ? "" : "s") ready to build.")))
                     .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
                 Spacer()
+                if !stuck.isEmpty, !projectBusy {
+                    Button("Reset \(stuck.count) stuck") { resetStuckTasks(stuck) }.controlSize(.small)
+                }
                 Button(action: { startFeatureAutopilot(featureTasks) }) {
                     Label("Start autopilot", systemImage: "play.fill").fontWeight(.semibold)
                 }
@@ -549,6 +573,8 @@ struct FeatureFlowView: View {
             stageHeading(.finish)
             if let md = deliverableMarkdown {
                 deliverablePanel(md)
+            } else if deliverableUnreadable, let path = live.deliverablePath {
+                CalloutBanner(.danger, "The deliverable file couldn't be read at \((path as NSString).abbreviatingWithTildeInPath) — it may have been moved or deleted. Re-run the Build stage to regenerate it.")
             } else if live.deliverablePath != nil {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
@@ -675,8 +701,14 @@ struct FeatureFlowView: View {
     /// Lazily create + link this feature's brief room when the user reaches the Brief stage.
     private func ensureBriefRoomIfNeeded() async {
         guard viewedStage == .brief, live.briefRoomId == nil else { return }
-        guard let room = try? await store.createBriefRoom(projectId: project.id) else { return }
-        try? await store.updateFeature(id: feature.id) { $0.briefRoomId = room.id }
+        do {
+            let room = try await store.createBriefRoom(projectId: project.id)
+            try await store.updateFeature(id: feature.id) { $0.briefRoomId = room.id }
+            await MainActor.run { briefRoomError = nil }
+        } catch {
+            // Surface it instead of an eternal "Setting up the brief workspace…" spinner.
+            await MainActor.run { briefRoomError = error.localizedDescription }
+        }
     }
 
     // MARK: ③ Tasks actions
@@ -745,21 +777,37 @@ struct FeatureFlowView: View {
         }
     }
 
-    /// Merge the feature's integration branch into the currently checked-out branch (guarding
-    /// protected branches, aborting cleanly on conflict), then mark the feature completed.
+    /// Merge the feature's integration branch INTO the base it was cut from (checking that base
+    /// out first — the autopilot leaves us ON the integration branch, so merging into "current"
+    /// would be a no-op self-merge that still marked the feature done). Guards protected branches,
+    /// aborts cleanly on conflict, then marks the feature completed.
     private func mergeAndFinish() {
         guard let branch = live.integrationBranch, !branch.isEmpty else { return }
         finalizing = true; mergeError = nil
         let projectPath = project.path
+        let persistedBase = live.baseBranch
         Task {
             do {
-                let base = try await GitService.currentBranch(projectPath: projectPath)
+                let current = try await GitService.currentBranch(projectPath: projectPath)
+                // Prefer the persisted base; fall back to the current branch only if we have nothing.
+                let base = (persistedBase?.isEmpty == false) ? persistedBase! : current
+                guard base != branch else {
+                    await MainActor.run {
+                        finalizing = false
+                        mergeError = "Couldn't determine the base branch to merge “\(branch)” into. Check out your target branch, then merge \(branch) by hand."
+                    }
+                    return
+                }
                 if GitService.protectedBranches.contains(base.lowercased()) {
                     await MainActor.run {
                         finalizing = false
-                        mergeError = "You're on protected branch “\(base)”. Check out your integration/feature branch, or merge \(branch) by hand."
+                        mergeError = "The base branch “\(base)” is protected — Atelier won't merge onto it. Merge \(branch) into \(base) by hand."
                     }
                     return
+                }
+                // Get onto the base branch before merging (we're on the integration branch now).
+                if current != base {
+                    try await GitService.checkoutBranch(projectPath: projectPath, branch: base)
                 }
                 let result = try await GitService.merge(into: base, branch: branch, projectPath: projectPath)
                 switch result {
@@ -770,11 +818,22 @@ struct FeatureFlowView: View {
                     try? await GitService.abortMerge(projectPath: projectPath)
                     await MainActor.run {
                         finalizing = false
-                        mergeError = "Merge conflicts in \(files.count) file(s). Aborted — merge \(branch) into \(base) by hand."
+                        mergeError = "Merge conflicts in \(files.count) file(s) merging \(branch) → \(base). Aborted — finish the merge by hand."
                     }
                 }
             } catch {
                 await MainActor.run { finalizing = false; mergeError = error.localizedDescription }
+            }
+        }
+    }
+
+    /// Resets tasks stranded `.inProgress` (a run that never finished — e.g. app quit mid-build)
+    /// back to To Do so the autopilot can pick them up again. Clears their transient progress badge.
+    private func resetStuckTasks(_ tasks: [AtelierTask]) {
+        Task {
+            for t in tasks {
+                try? await store.updateTaskStatus(t, to: .toDo)
+                await store.clearProgress(taskId: t.id)
             }
         }
     }
@@ -831,12 +890,21 @@ struct FeatureFlowView: View {
                                            behavior: .deny,
                                            reason: "Coverage setup must never push/merge/rebase your branch",
                                            scope: .run)]
+        // Never wire while a build/synthesis run is active on this project — the repo is on the
+        // integration branch and serial merges touch the index; a setup commit would race them.
+        guard !featureRunner.isProjectBusy(project.id) else {
+            wiringCoverage = false
+            coverageNote = "A build is running on this project — wait for it to finish, then wire coverage."
+            return
+        }
         Task { @MainActor in
-            // Refuse on a dirty tree so the setup commit can't sweep unrelated work in.
-            let clean = (try? await GitService.isClean(projectPath: project.path)) ?? false
+            // Refuse on uncommitted TRACKED work so the setup commit can't sweep it in. Untracked
+            // files don't count (the worker stages only the files it changes, by path — never
+            // `git add -A`), so Atelier's own artifacts / a prior FEATURE-*.md don't falsely block.
+            let clean = (try? await GitService.isClean(projectPath: project.path, includeUntracked: false)) ?? false
             guard clean else {
                 wiringCoverage = false
-                coverageNote = "Your working tree has uncommitted changes — commit or stash them first, then wire coverage so the setup lands in its own clean commit."
+                coverageNote = "You have uncommitted changes to tracked files — commit or stash them first, then wire coverage so the setup lands in its own clean commit."
                 return
             }
             let outcome = await spawner.runManagedWorker(

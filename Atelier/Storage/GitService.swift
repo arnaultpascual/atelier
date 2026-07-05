@@ -360,8 +360,13 @@ enum GitService {
     }
 
     /// True when the given repo's working tree has no uncommitted changes.
-    static func isClean(projectPath: String) async throws -> Bool {
-        let r = try await runGit(args: ["status", "--porcelain"], workingDirectory: projectPath)
+    /// `includeUntracked: false` (`-uno`) ignores untracked files — use it when the concern
+    /// is only the user's uncommitted TRACKED work (e.g. before a scoped setup commit), so
+    /// Atelier's own generated artifacts (a root `FEATURE-*.md`, `.atelier/…`) don't count.
+    static func isClean(projectPath: String, includeUntracked: Bool = true) async throws -> Bool {
+        var args = ["status", "--porcelain"]
+        if !includeUntracked { args.append("--untracked-files=no") }
+        let r = try await runGit(args: args, workingDirectory: projectPath)
         guard r.success else { throw Error.commandFailed("git status --porcelain", stderr: r.stderr) }
         return r.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }

@@ -147,6 +147,10 @@ func writeStdout(_ data: Data) {
 
 // MARK: - Main loop
 
+// A dead stdout/socket peer must not kill us with SIGPIPE — writes return EOF/EPIPE instead,
+// which the loops already handle (they exit cleanly).
+signal(SIGPIPE, SIG_IGN)
+
 let args = ServerArgs.parse(CommandLine.arguments)
 logErr("start feature=\(args.featureId ?? "-") task=\(args.taskId ?? "-") socket=\(args.socketPath ?? "-")")
 
