@@ -360,7 +360,8 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
                     instructions: """
                     Wire JaCoCo code coverage into this Android/Gradle project so a coverage XML report is produced for the JVM unit tests. Do this and NOTHING else — do not touch app code or existing tests.
                     - Apply the `jacoco` plugin in the app module's build.gradle(.kts).
-                    - Add a `jacocoTestReport` task that depends on `testDebugUnitTest` and sets `reports { xml.required.set(true) }` (Groovy: `xml.required = true`), with class/source dirs for the `debug` variant. Exclude generated classes (R.class, BuildConfig, *_Impl, Hilt/Dagger, databinding).
+                    - Add a `jacocoTestReport` task that depends on `testDebugUnitTest` and sets `reports { xml.required.set(true) }` (Groovy: `xml.required = true`), with class/source dirs for the `debug` variant.
+                    - EXCLUDE from the class dirs (so coverage reflects what a JVM unit test can actually cover, not UI the gate can't reach): generated classes (`**/R.class`, `**/R$*.class`, `**/BuildConfig.*`, `**/*_Impl.*`, Hilt/Dagger `**/Dagger*`, `**/*_Factory.*`, `**/*_MembersInjector.*`, databinding); AND the Compose UI layer that only an instrumented/Robolectric UI test could exercise — the theme (`**/ui/theme/**`), the Activity (`**/*Activity*`), and the @Composable screen files (e.g. `**/*Screen*`, `**/*ScreenKt*`). Keep ViewModels, mappers, repositories, use-cases, and UI-state models IN scope — that's the business logic the JVM gate should cover. (Composable rendering is validated by running the app, not by unit coverage.)
                     - Verify: `./gradlew testDebugUnitTest jacocoTestReport` exits 0 AND an XML report exists under `**/build/reports/jacoco/**/*.xml` (or `jacocoTestReport.xml`).
                     - Commit ONLY the Gradle config changes (build.gradle(.kts), version catalog if used).
                     """)
