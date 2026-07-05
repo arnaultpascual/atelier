@@ -636,7 +636,13 @@ final class FeatureBuildRunner {
             } else if !result.passed {
                 await applyGate(task.id, deps: deps, state: .regressed,
                                 summary: "Post-merge regression: \(result.summaryLine)")
-                await block(task, "post-merge regression: \(result.summaryLine)", run: run, deps: deps)
+                // Capture the failing command's output so the report shows WHAT regressed
+                // (e.g. a duplicate declaration from two tasks colliding on merge).
+                let failTail = result.perCommand.first(where: { !$0.passed }).map {
+                    ["$ \($0.command)", $0.stderrTail, $0.stdoutTail]
+                        .filter { !$0.isEmpty }.joined(separator: "\n")
+                }
+                await block(task, "post-merge regression: \(result.summaryLine)", run: run, deps: deps, detail: failTail)
                 return   // leave the worktree on disk for inspection
             } else {
                 summary = result.summaryLine
@@ -898,9 +904,9 @@ final class FeatureBuildRunner {
         """
     }
 
-    private func block(_ task: AtelierTask, _ reason: String, run: AutopilotRun, deps: Deps) async {
+    private func block(_ task: AtelierTask, _ reason: String, run: AutopilotRun, deps: Deps, detail: String? = nil) async {
         logger.warning("autopilot blocked \(task.id, privacy: .public): \(reason, privacy: .public)")
-        writeAutopilotReport(task: task, project: deps.project, report: run.reportByTask[task.id], outcome: "Blocked — \(reason)")
+        writeAutopilotReport(task: task, project: deps.project, report: run.reportByTask[task.id], outcome: "Blocked — \(reason)", detail: detail)
         run.taskPhases[task.id] = .blocked(reason: reason)
         // Mirror the reason onto the card too (same ephemeral channel MCP blocks use), so the
         // kanban shows WHY every blocked task is blocked — not just autopilot-internal reports.
@@ -1083,11 +1089,16 @@ final class FeatureBuildRunner {
 
     /// Persists a human-readable per-task report to `<project>/.atelier/autopilot/<taskId>.md`,
     /// surfaced in the task detail so the review + outcome stay consultable after the run.
-    private func writeAutopilotReport(task: AtelierTask, project: Project, report: ReviewReport?, outcome: String) {
+    private func writeAutopilotReport(task: AtelierTask, project: Project, report: ReviewReport?, outcome: String, detail: String? = nil) {
         var md = "# Autopilot — \(task.title)\n\n"
         md += "- **Task:** `\(task.id)`\n"
         md += "- **Outcome:** \(outcome)\n"
         md += "- **When:** \(Date().formatted(date: .abbreviated, time: .shortened))\n\n"
+        // Full failure output (e.g. the gradle/compiler tail on a post-merge regression) so a
+        // blocked task is diagnosable — the card's one-liner never carries enough to act on.
+        if let detail, !detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            md += "## Failure output\n\n```\n\(detail.suffix(6000))\n```\n\n"
+        }
         if let report {
             md += "## Review\n\n**Verdict:** \(report.verdict.rawValue)\n\n"
             if !report.summary.isEmpty { md += "\(report.summary)\n\n" }

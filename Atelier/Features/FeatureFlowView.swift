@@ -575,10 +575,21 @@ struct FeatureFlowView: View {
                         }
                     }
                 }
-                // Blocked reason reported via task_signal_blocked (MCP), when set.
-                if t.status == .blocked, let reason = store.taskBlockedReason[t.id], !reason.isEmpty {
-                    Text(reason).font(.system(size: 9))
-                        .foregroundStyle(Palette.error).lineLimit(2)
+                // Blocked: show the one-line reason (when still in memory) + a link to the full
+                // report on disk (gradle/compiler output etc.) — survives relaunch, unlike the reason.
+                if t.status == .blocked {
+                    if let reason = store.taskBlockedReason[t.id], !reason.isEmpty {
+                        Text(reason).font(.system(size: 9))
+                            .foregroundStyle(Palette.error).lineLimit(2)
+                    }
+                    let report = URL(fileURLWithPath: project.path)
+                        .appendingPathComponent(".atelier/autopilot/\(t.id).md")
+                    if FileManager.default.fileExists(atPath: report.path) {
+                        Button("Voir le rapport →") { NSWorkspace.shared.open(report) }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(Color.atelierAccent)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
