@@ -81,6 +81,14 @@ All notable changes to Atelier are documented here. The format is based on
     disable). A missing/unreachable server degrades to the pure file+git contract. New `AtelierTests`
     unit-test target added. Design + Phase 0 verification in `docs/mcp-capability.md`.
 
+- **Recette — auto-generated acceptance test plan.** When a feature finishes synthesis, Atelier
+  writes an interactive `FEATURE-<slug>-recette.html` at the project root: exactly what a dev
+  should run to validate the feature (checkboxes, priorities, progress, saved locally). Hybrid
+  generation — deterministic seeds from the brief's acceptance criteria + findings + coverage gaps
+  + tasks, enriched by an agent sub-step into concrete steps (graceful fallback to the seeds). A
+  "Ouvrir la recette" button in the Finish stage opens it; the file is committable and travels with
+  the branch. First shippable slice of the *Chantier Recette* idea. Design in `docs/feature-recette.md`.
+
 ### Fixed
 
 - **Strict-TDD gate is now authoritative even when a worker self-promotes.** A worker calling
