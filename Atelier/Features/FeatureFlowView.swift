@@ -24,7 +24,10 @@ struct FeatureFlowView: View {
     @State private var coverageStatus: CoverageEnablement.Status?
     @State private var wiringCoverage = false
     @State private var coverageNote: String?
-    @State private var coverageNeedsCommit = false
+    // Coverage is wired on a dedicated Atelier branch (never committed to the user's branch, esp. a
+    // protected main, without an explicit merge). These hold the pending setup branch + its base.
+    @State private var coverageSetupBranch: String?
+    @State private var coverageSetupBase: String?
     @State private var advancing = false
     // ③ Tasks
     @State private var decomposing = false
@@ -226,19 +229,18 @@ struct FeatureFlowView: View {
                         Button {
                             wireCoverage()
                         } label: {
-                            Label("Wire \(tool) coverage", systemImage: "chart.bar.doc.horizontal")
+                            Label(coverageSetupBranch == nil ? "Wire \(tool) coverage" : "Re-wire", systemImage: "chart.bar.doc.horizontal")
                         }
-                        .buttonStyle(.borderedProminent).controlSize(.small)
-                        // Shown only when the last attempt was refused for a dirty tree: the dirty
-                        // file is usually Atelier's own scaffold amendment (.gitignore). Commit JUST
-                        // the scaffold paths (never a blanket add of the user's work), then wire.
-                        if coverageNeedsCommit {
+                        .buttonStyle(.bordered).controlSize(.small)
+                        // After wiring, the coverage lives on a dedicated Atelier branch — merge it
+                        // into the base (refused on a protected base → merge by hand / PR).
+                        if coverageSetupBranch != nil {
                             Button {
-                                commitSetupAndWire()
+                                mergeCoverageSetup()
                             } label: {
-                                Label("Committer le setup & wire", systemImage: "checkmark.seal")
+                                Label("Merger le setup", systemImage: "arrow.triangle.merge")
                             }
-                            .controlSize(.small)
+                            .buttonStyle(.borderedProminent).controlSize(.small)
                         }
                     }
                 }
@@ -903,91 +905,99 @@ struct FeatureFlowView: View {
     private func loadCoverageStatus() async {
         guard viewedStage == .prerequisites else { coverageStatus = nil; coverageNote = nil; return }
         coverageNote = nil   // drop any stale success/failure note on (re)entry so the button returns
-        coverageNeedsCommit = false
         let profile = self.profile
         let path = project.path
         // Bounded filesystem scan — keep it off the main actor.
         coverageStatus = await Task.detached { CoverageEnablement.status(profile: profile, projectPath: path) }.value
     }
 
-    /// Commits ONLY Atelier's scaffold paths (never the user's other work), then retries wiring.
-    /// The dirty tracked file that trips the guard on a fresh add is Atelier's own `.gitignore`
-    /// amendment; this lands it (plus backlog/ + .atelier/config.yml) as a clean setup commit.
-    private func commitSetupAndWire() {
-        coverageNeedsCommit = false
+    /// Merges the pending coverage-setup branch into its base. Refuses a protected base (the user
+    /// merges it by hand / via PR — Atelier never writes to a protected branch), mirroring
+    /// `mergeAndFinish`. On success, re-probes so the callout flips to "wired".
+    private func mergeCoverageSetup() {
+        guard let setup = coverageSetupBranch, let base = coverageSetupBase else { return }
         coverageNote = nil
         let projectPath = project.path
         Task { @MainActor in
-            do {
-                let committed = try await GitService.commit(
-                    paths: [".gitignore", "backlog", ".atelier/config.yml"],
-                    message: "chore: Atelier setup", projectPath: projectPath)
-                if !committed {
-                    // Nothing of ours to commit → the dirty files are the user's; don't touch them.
-                    coverageNote = "The uncommitted changes aren't Atelier's setup — commit or stash your own work first, then wire."
-                    coverageNeedsCommit = false
-                    return
-                }
-            } catch {
-                coverageNote = "Couldn't commit the setup: \(error.localizedDescription)"
+            if GitService.protectedBranches.contains(base.lowercased()) {
+                coverageNote = "« \(base) » est protégée — merge « \(setup) » dans « \(base) » à la main (ou via PR). Le setup est prêt sur cette branche."
                 return
             }
-            wireCoverage()   // tree should be clean now → proceeds
+            do {
+                let current = try await GitService.currentBranch(projectPath: projectPath)
+                if current != base { try await GitService.checkoutBranch(projectPath: projectPath, branch: base) }
+                let result = try await GitService.merge(into: base, branch: setup, projectPath: projectPath)
+                switch result {
+                case .clean, .upToDate:
+                    coverageSetupBranch = nil; coverageSetupBase = nil
+                    await loadCoverageStatus()   // now on base with coverage → flips to .wired
+                    coverageNote = "Coverage mergé dans « \(base) » ✓."
+                case .conflict(let files):
+                    try? await GitService.abortMerge(projectPath: projectPath)
+                    coverageNote = "Conflits sur \(files.count) fichier(s) en mergeant \(setup) → \(base). Annulé — merge à la main."
+                }
+            } catch {
+                coverageNote = "Merge du setup échoué : \(error.localizedDescription)"
+            }
         }
     }
 
-    /// Spawns a one-shot setup worker (opt-in) to wire the mode's coverage tooling in
-    /// place on the current branch, its own commit. Re-probes afterward.
+    /// Wires the mode's coverage tooling on a DEDICATED Atelier branch (never on the user's branch
+    /// directly): cut `atelier/coverage-setup-<hex>` off HEAD, commit Atelier's scaffold there, run
+    /// the setup worker there, return to the base branch, then offer "Merger le setup". Opt-in.
     private func wireCoverage() {
         guard !wiringCoverage, let instructions = CoverageEnablement.setupInstructions(profile: profile) else { return }
+        // Never wire while a build/synthesis run is active — the repo is on the integration branch
+        // and serial merges touch the index; cutting a branch + committing would race them.
+        guard !featureRunner.isProjectBusy(project.id) else {
+            coverageNote = "A build is running on this project — wait for it to finish, then wire coverage."
+            return
+        }
         wiringCoverage = true
         coverageNote = nil
-        coverageNeedsCommit = false
+        coverageSetupBranch = nil; coverageSetupBase = nil
         let prompt = """
-        You are wiring code-coverage tooling into this project as a one-time setup. Work in the current directory (the project root). This is infrastructure only.
+        You are wiring code-coverage tooling into this project as a one-time setup. Work in the current directory (the project root), on the branch that is currently checked out. This is infrastructure only.
 
         \(instructions)
 
         Do ONLY the above — do not modify application code or existing tests. Stage ONLY the specific files you changed, by path; do NOT run `git add -A`, `git add .`, or `git commit -am`, and do NOT push, merge, or rebase. Then `git commit` with a clear message.
         """
-        // Hard fence (enforced, not just prompt text): this foreground worker runs on the
-        // user's real branch, so deny any history/remote mutation even under auto-accept.
+        // Enforced fence: even on Atelier's own setup branch, the worker must not push/merge/rebase/reset.
         let denyGitWrite = [PermissionRule(tool: "Bash",
                                            pattern: "re:^git (push|merge|rebase|reset)( |$)",
                                            behavior: .deny,
-                                           reason: "Coverage setup must never push/merge/rebase your branch",
+                                           reason: "Coverage setup must never push/merge/rebase",
                                            scope: .run)]
-        // Never wire while a build/synthesis run is active on this project — the repo is on the
-        // integration branch and serial merges touch the index; a setup commit would race them.
-        guard !featureRunner.isProjectBusy(project.id) else {
-            wiringCoverage = false
-            coverageNote = "A build is running on this project — wait for it to finish, then wire coverage."
-            return
-        }
+        let projectPath = project.path
+        let setupBranch = "atelier/coverage-setup-\(UUID().uuidString.prefix(8))"
         Task { @MainActor in
-            // Refuse on uncommitted TRACKED work so the setup commit can't sweep it in. Untracked
-            // files don't count (the worker stages only the files it changes, by path — never
-            // `git add -A`), so Atelier's own artifacts / a prior FEATURE-*.md don't falsely block.
-            let clean = (try? await GitService.isClean(projectPath: project.path, includeUntracked: false)) ?? false
-            guard clean else {
+            do {
+                let base = try await GitService.currentBranch(projectPath: projectPath)
+                // Dedicated Atelier branch: nothing lands on the user's branch (esp. a protected main)
+                // without an explicit merge. `checkout -b` carries the dirty scaffold over onto it.
+                try await GitService.createIntegrationBranch(projectPath: projectPath, branch: setupBranch)
+                // Capture ONLY Atelier's own scaffold (never the user's other work) as a clean commit.
+                try? await GitService.commit(paths: [".gitignore", "backlog", ".atelier/config.yml"],
+                                             message: "chore: Atelier setup", projectPath: projectPath)
+                // Run the setup worker ON the setup branch (it commits the coverage config there).
+                let outcome = await spawner.runManagedWorker(
+                    label: "coverage-setup", prompt: prompt, workingDirectory: projectPath,
+                    project: project, model: ModelRouter.latestOpus, apiKey: APIKeyResolver.resolve(),
+                    store: store, server: server, approvalQueue: approvalQueue, maxTurns: 40,
+                    featureId: live.id, extraDenyRules: denyGitWrite)
+                // Return to the base branch so the repo isn't stranded on the setup branch; the
+                // coverage config lives on `setupBranch` until the user merges it.
+                try? await GitService.checkoutBranch(projectPath: projectPath, branch: base)
                 wiringCoverage = false
-                coverageNeedsCommit = true   // offer the one-click "commit the scaffold & wire"
-                coverageNote = "Uncommitted changes to tracked files (often Atelier's own .gitignore setup). Commit the setup — or your own work — first, then wire so the setup lands in a clean commit."
-                return
-            }
-            let outcome = await spawner.runManagedWorker(
-                label: "coverage-setup", prompt: prompt, workingDirectory: project.path,
-                project: project, model: ModelRouter.latestOpus, apiKey: APIKeyResolver.resolve(),
-                store: store, server: server, approvalQueue: approvalQueue, maxTurns: 40,
-                featureId: live.id, extraDenyRules: denyGitWrite)
-            wiringCoverage = false
-            await loadCoverageStatus()   // clears any prior note, re-probes
-            if case .wired? = coverageStatus {
-                coverageNote = "Coverage tooling wired ✓ — committed to this branch."
-            } else if outcome.completed {
-                coverageNote = "Setup worker finished but coverage still isn't detected — check the diff."
-            } else {
-                coverageNote = "Coverage setup didn't complete\(outcome.looksUsageLimited ? " (usage limit)" : "") — you can retry or wire it manually. This never blocks the build."
+                coverageSetupBase = base
+                coverageSetupBranch = setupBranch
+                coverageNote = outcome.completed
+                    ? "Coverage wired on branch « \(setupBranch) ». Review it, then « Merger le setup » into « \(base) »."
+                    : "Coverage setup didn't complete\(outcome.looksUsageLimited ? " (usage limit)" : "") on « \(setupBranch) » — inspect/merge it or re-wire. Never blocks the build."
+            } catch {
+                wiringCoverage = false
+                coverageNote = "Couldn't set up the coverage branch: \(error.localizedDescription)"
             }
         }
     }
