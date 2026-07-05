@@ -319,7 +319,7 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
             suggestedLabels: ["android", "kotlin", "compose"],
             description: "build.gradle.kts / settings.gradle.kts / AndroidManifest.xml.",
             defaultRules: baseReadOnlyRules + [
-                .init(tool: "Bash", pattern: "re:^\\./gradlew (assembleDebug|test|testDebugUnitTest|connectedDebugAndroidTest|lint|build|tasks|projects|dependencies)( |$)", behavior: .allow, reason: "Common gradle tasks", scope: .profile),
+                .init(tool: "Bash", pattern: "re:^\\./gradlew (assembleDebug|test|testDebugUnitTest|connectedDebugAndroidTest|jacocoTestReport|createDebugUnitTestCoverageReport|lint|build|tasks|projects|dependencies)( |$)", behavior: .allow, reason: "Common gradle tasks", scope: .profile),
             ],
             build: .init(
                 buildCommand: "./gradlew assembleDebug",
@@ -346,6 +346,11 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
                           installHint: "Needed only for `connectedDebugAndroidTest` (a running emulator/device). Optional for the JVM unit gate.",
                           required: false),
                 ],
+                // Runs the JaCoCo report task the coverageSetup standardises on (it depends on
+                // testDebugUnitTest, so this runs the tests + emits the XML). Best-effort at dossier
+                // time: when JaCoCo isn't wired the task is missing → runCommand fails → nil coverage
+                // (no crash). CoverageReport parses the JaCoCo XML under build/reports/jacoco/**.
+                coverageCommand: "./gradlew testDebugUnitTest jacocoTestReport",
                 coverageSetup: .init(
                     probeFiles: ["build.gradle", "build.gradle.kts"],
                     // Specific plugin-application / config tokens, not the bare word — a comment
