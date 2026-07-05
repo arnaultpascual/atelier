@@ -308,8 +308,11 @@ final class TaskSpawner {
         if FileManager.default.fileExists(atPath: attachmentsDir) {
             additionalDirs.append(attachmentsDir)
         }
-        // Give worker access to the project root so it can read backlog/, ., etc.
-        additionalDirs.append(project.path)
+        // Deliberately do NOT --add-dir the project root: `--add-dir` grants WRITE access, and the
+        // worktree is already a full checkout of every tracked file. Adding the shared root let
+        // workers write their changes THERE (the prompt names "Project root: <root>"), polluting the
+        // integration branch's working tree and breaking the serial merge. The worker is confined to
+        // its worktree; task context is in the prompt and attachments come via `attachmentsDir` above.
 
         // 7. Launch worker
         let runner = WorkerRunner()
@@ -531,6 +534,14 @@ final class TaskSpawner {
             iterateMessage += "\n\n" + MCPCapability.taskWorkerGuidance(featureId: fid)
         }
 
+        // Confined to the worktree (see execute): only the task's own attachments dir is added,
+        // NOT the shared project root — a root --add-dir grants write access and lets the worker
+        // pollute the integration branch's working tree, breaking the serial merge.
+        let attachmentsDir = URL(fileURLWithPath: project.path)
+            .appendingPathComponent(".atelier").appendingPathComponent("attachments")
+            .appendingPathComponent(task.id).path
+        let iterateDirs = FileManager.default.fileExists(atPath: attachmentsDir) ? [attachmentsDir] : []
+
         let runner = WorkerRunner()
         let invocation = WorkerRunner.Invocation(
             prompt: iterateMessage,
@@ -539,7 +550,7 @@ final class TaskSpawner {
             agentId: sessionUUID,
             settingsPath: session.settingsPath,
             workingDirectory: worktreePath,
-            additionalDirs: [project.path],
+            additionalDirs: iterateDirs,
             includePartialMessages: false,
             maxTurns: 40,
             resumeSessionId: sessionId,
@@ -650,8 +661,9 @@ final class TaskSpawner {
 
         var meta: [String] = []
         meta.append("Task id: `\(task.id)`")
-        meta.append("Branch: `\(worktree.branch)` (worktree under `\(worktree.relativePath)`)")
-        meta.append("Project root: `\(project.path)`")
+        // The worktree IS your working copy (a full checkout). Work here and commit here — do not
+        // reach outside it; the real project root is off-limits (it's the shared integration tree).
+        meta.append("Working copy: `\(worktree.absolutePath)` on branch `\(worktree.branch)`")
         if !task.labels.isEmpty {
             meta.append("Labels: \(task.labels.joined(separator: ", "))")
         }
