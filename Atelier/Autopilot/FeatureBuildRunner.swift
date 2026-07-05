@@ -634,16 +634,45 @@ final class FeatureBuildRunner {
                 toolchainMissing = true
                 await applyGate(task.id, deps: deps, state: .toolchainMissing, summary: result.summaryLine)
             } else if !result.passed {
-                await applyGate(task.id, deps: deps, state: .regressed,
-                                summary: "Post-merge regression: \(result.summaryLine)")
-                // Capture the failing command's output so the report shows WHAT regressed
-                // (e.g. a duplicate declaration from two tasks colliding on merge).
-                let failTail = result.perCommand.first(where: { !$0.passed }).map {
-                    ["$ \($0.command)", $0.stderrTail, $0.stdoutTail]
-                        .filter { !$0.isEmpty }.joined(separator: "\n")
+                // Post-merge regression — usually a cross-task collision (two merged tasks touched
+                // the same symbol/file, e.g. a duplicate declaration). Attempt a bounded fix ON the
+                // integration branch in place, then re-test; only block if it's still red. A fix that
+                // lands leaves the task Done, so its dependents (which waited on it) become runnable
+                // again next wave — instead of a hard block that strands the whole dependency chain.
+                var fixed = result
+                var pass = 0
+                while !fixed.passed && !fixed.toolchainMissing && pass < maxFixPasses
+                        && run.status == .running && !overBudget(run) {
+                    pass += 1
+                    run.taskPhases[task.id] = .fixing(pass: pass)
+                    let tail = fixed.perCommand.first(where: { !$0.passed })
+                        .map { $0.stderrTail.isEmpty ? $0.stdoutTail : $0.stderrTail } ?? fixed.summaryLine
+                    let fixOutcome = await deps.spawner.runManagedWorker(
+                        label: "post-merge-fix",
+                        prompt: featureFixPrompt(tail),
+                        workingDirectory: deps.project.path,
+                        project: deps.project, model: ModelRouter.latestOpus, apiKey: deps.apiKey,
+                        store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue,
+                        featureId: run.featureId)
+                    run.costByTask[task.id, default: 0] += fixOutcome.costUsd
+                    if fixOutcome.looksUsageLimited { break }
+                    fixed = await TestRunner.runFastTests(profile: profile, worktreePath: deps.project.path, mainRepoPath: deps.project.path)
                 }
-                await block(task, "post-merge regression: \(result.summaryLine)", run: run, deps: deps, detail: failTail)
-                return   // leave the worktree on disk for inspection
+                if fixed.passed {
+                    // Repaired → fall through to the success finalization (marks the task Done).
+                    summary = pass > 0 ? "\(outcome) — post-merge regression auto-fixed (\(pass) pass\(pass == 1 ? "" : "es"))" : result.summaryLine
+                } else {
+                    await applyGate(task.id, deps: deps, state: .regressed,
+                                    summary: "Post-merge regression: \(fixed.summaryLine)")
+                    // Full failing-command output so the report shows WHAT regressed.
+                    let failTail = fixed.perCommand.first(where: { !$0.passed }).map {
+                        ["$ \($0.command)", $0.stderrTail, $0.stdoutTail]
+                            .filter { !$0.isEmpty }.joined(separator: "\n")
+                    }
+                    await block(task, "post-merge regression not fixed after \(maxFixPasses) pass\(maxFixPasses == 1 ? "" : "es"): \(fixed.summaryLine)",
+                                run: run, deps: deps, detail: failTail)
+                    return   // leave the worktree on disk for inspection
+                }
             } else {
                 summary = result.summaryLine
             }
