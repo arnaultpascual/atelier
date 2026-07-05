@@ -398,7 +398,8 @@ enum AIAssistant {
             This project uses STRICT TDD. Every task's "## Acceptance criteria" MUST require writing \
             the test(s) FIRST and the test command above passing green. Atelier runs that command in \
             the worktree and blocks review/merge on a non-zero exit. Do NOT require building/assembling \
-            the full app to verify — rely on unit tests (the app build is opt-in and may be slow).
+            the full app to verify — rely on unit tests (the app build is opt-in and may be slow).\
+            \(b.runtimeHint.map { "\n\nRUNTIME must-haves for \(profile.name) — these COMPILE and pass unit tests but only fail when the app RUNS, so the gate can't catch them. Make sure a task explicitly OWNS each one:\n- \($0)" } ?? "")
             """
         } else {
             modeSection = ""

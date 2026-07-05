@@ -706,6 +706,11 @@ final class TaskSpawner {
             sections.append(tdd.joined(separator: "\n"))
         }
 
+        // Runtime prerequisites the gate can't catch (compile + unit tests pass, app crashes at run).
+        if let rh = b.runtimeHint {
+            sections.append("## Runtime prerequisites (the test gate can't catch these)\n\nIf your task touches the relevant area, handle it — it won't fail the gate but WILL crash the running app:\n- \(rh)")
+        }
+
         sections.append("""
         ## House rules
 

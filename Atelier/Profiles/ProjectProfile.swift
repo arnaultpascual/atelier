@@ -40,6 +40,10 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
         var buildCommand: String?               // e.g. "./gradlew assembleDebug" — nil = no build gate
         var testCommands: [TestCommand]         // exit 0 of all .fast = green
         var testScaffoldingHint: String?        // one line injected into decompose + worker prompts
+        /// Platform runtime prerequisites that COMPILE and pass unit tests but only fail when the app
+        /// actually RUNS (so the gate can't catch them) — e.g. an Android manifest permission. Injected
+        /// into the decompose + worker prompts so the plan/implementation doesn't forget them.
+        var runtimeHint: String? = nil
         var testDiscoveryGlobs: [String]        // proves a test setup exists (else → scaffold)
         var requiredTools: [ToolRequirement] = [] // toolchain that must be present to run build/test
         /// Optional INFORMATIONAL coverage command (e.g. `dotnet test --collect:"XPlat Code Coverage"`).
@@ -326,6 +330,7 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
                           command: "./gradlew connectedDebugAndroidTest", tier: .optional, requiresDevice: true),
                 ],
                 testScaffoldingHint: "Unit tests live in src/test/java|kotlin (JVM, JUnit + MockK, run by ./gradlew testDebugUnitTest). Instrumented/UI tests live in src/androidTest and need a device/emulator. Write JVM unit tests FIRST; add an instrumented test only when the change is UI/integration a JVM test can't cover. If no test source set exists, create src/test/java/<pkg>/ and add the JUnit/MockK test dependencies if missing.",
+                runtimeHint: "Declare required manifest permissions in AndroidManifest.xml — ANY network/HTTP access (Retrofit/OkHttp/etc.) needs `<uses-permission android:name=\"android.permission.INTERNET\"/>`. It compiles and unit tests pass (they mock the network), but the app crashes at runtime with SecurityException if it's missing. Same for other runtime needs (e.g. FileProvider, exported components, ProGuard keep rules).",
                 testDiscoveryGlobs: ["**/src/test/**/*.kt", "**/src/test/**/*.java", "**/src/androidTest/**"],
                 requiredTools: [
                     .init(id: "jdk", label: "Java JDK", probe: .executable("java"),
