@@ -149,10 +149,15 @@ struct PreparePromptView: View {
                     LazyVStack(alignment: .leading, spacing: 10) {
                         ForEach(messages) { ChatBubble(message: $0) }
                         if liveRunning {
-                            HStack(spacing: 6) {
+                            HStack(spacing: 8) {
                                 ProgressView().controlSize(.small)
                                 Text("Claude is thinking…").font(AtelierFont.caption)
                                     .foregroundStyle(Color.atelierInkSecondary)
+                                Button("Stop") {
+                                    if let id = selectedBriefId { chatSpawner.cancel(roomId: id) }
+                                }
+                                .controlSize(.small)
+                                .help("Interrompre le tour en cours (le brief.md déjà écrit est conservé).")
                             }
                             .padding(.vertical, 4)
                         }
@@ -820,7 +825,8 @@ struct PreparePromptView: View {
         var lines = [
             "We are co-authoring the implementation brief for a feature. The brief lives in the file `brief.md` in your current working directory — it is the single source of truth (create it if it doesn't exist yet).",
             "On EVERY message from me: (1) read `brief.md`, (2) update it to reflect our evolving understanding, then (3) reply briefly IN CHAT with just what you changed and any open questions — do NOT paste the brief in chat.",
-            "Keep `brief.md` structured with: ## Goal, ## Context, ## Constraints, ## Acceptance criteria, ## Open questions. Acceptance criteria must be objectively TESTABLE — strict TDD, tests written first that then pass\(coverageClause). Resolve ambiguities by making reasonable assumptions and stating them in Context/Constraints; keep only genuinely-blocking items under Open questions."
+            "Keep `brief.md` structured with: ## Goal, ## Context, ## Constraints, ## Acceptance criteria, ## Open questions. Acceptance criteria must be objectively TESTABLE — strict TDD, tests written first that then pass\(coverageClause). Resolve ambiguities by making reasonable assumptions and stating them in Context/Constraints; keep only genuinely-blocking items under Open questions.",
+            "SCOPE — you ONLY author `brief.md`. Do NOT implement the feature, write source code, add dependencies, run build/test commands, or narrate implementation steps or 'pieces'. If I paste a full feature spec, DISTILL it into the brief (Context / Constraints / Acceptance criteria) — never build it. A task decomposer and separate build workers implement it later, elsewhere. When the brief is complete (all sections filled, no blocking open questions), reply exactly 'Brief ready.' and STOP — do not continue working."
         ]
         if let hint = profile.build.testScaffoldingHint { lines.append("Test conventions: \(hint)") }
         if !room.contextPaths.isEmpty {
