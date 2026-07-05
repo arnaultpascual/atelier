@@ -583,6 +583,7 @@ struct FeatureFlowView: View {
             } else {
                 CalloutBanner(.info, "The deliverable (FEATURE-<slug>.md at the project root) is generated automatically when the autopilot finishes. Complete the Build stage first.")
             }
+            recettePanel
             finalizePanel
         }
     }
@@ -610,6 +611,30 @@ struct FeatureFlowView: View {
                     .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
                     .lineLimit(1).truncationMode(.middle)
             }
+        }
+    }
+
+    /// The auto-generated acceptance test plan (recette), if synthesis produced it. Opens the
+    /// self-contained HTML in the default browser; committable, shareable with the PR.
+    private var recetteURL: URL { RecetteBuilder.recetteURL(projectPath: project.path, featureName: live.name) }
+    @ViewBuilder
+    private var recettePanel: some View {
+        if FileManager.default.fileExists(atPath: recetteURL.path) {
+            HStack(spacing: 8) {
+                Image(systemName: "checklist").foregroundStyle(Color.atelierAccent)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Recette de test").font(AtelierFont.caption.weight(.medium)).foregroundStyle(Color.atelierInk)
+                    Text("Ce qu'il faut vérifier pour valider la feature — page interactive, committée avec la branche.")
+                        .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                }
+                Spacer(minLength: 8)
+                Button("Ouvrir la recette") { NSWorkspace.shared.open(recetteURL) }
+                    .buttonStyle(.borderedProminent).controlSize(.small)
+                Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting([recetteURL]) }.controlSize(.small)
+            }
+            .padding(11)
+            .background(Color.atelierSurface.opacity(0.4), in: RoundedRectangle(cornerRadius: AtelierCorner.card))
+            .overlay(RoundedRectangle(cornerRadius: AtelierCorner.card).stroke(Color.atelierDivider, lineWidth: 1))
         }
     }
 

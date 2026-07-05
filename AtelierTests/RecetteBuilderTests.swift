@@ -69,6 +69,25 @@ final class RecetteBuilderTests: XCTestCase {
         XCTAssertTrue(url.path.hasPrefix("/tmp/proj/"))
     }
 
+    func testParseRecetteItemsTolerant() throws {
+        let json = """
+        Voici le plan :
+        {"items":[
+          {"id":"ac1","group":"Critères d'acceptation","title":"200 sur /health","priority":"p0","validates":"AC","steps":["curl /health"],"expected":"200","hint":null},
+          {"title":"Sans id ni steps","priority":"weird"},
+          {"title":"   ","priority":"p2"}
+        ]}
+        """
+        let items = try AIAssistant.parseRecetteItems(json)
+        XCTAssertEqual(items.count, 2)                       // blank-title dropped
+        XCTAssertEqual(items[0].priority, .p0)
+        XCTAssertEqual(items[0].steps, ["curl /health"])
+        XCTAssertEqual(items[1].id, "ri2")                  // id backfilled by index
+        XCTAssertEqual(items[1].priority, .p1)              // bad priority → p1
+        XCTAssertEqual(items[1].group, "À vérifier")        // missing group default
+        XCTAssertEqual(items[1].steps, ["À vérifier."])     // empty steps default
+    }
+
     func testBulletsStripMarkers() {
         let doc = brief("""
         ## Requirements

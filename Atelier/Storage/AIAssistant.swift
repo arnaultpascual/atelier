@@ -560,6 +560,95 @@ enum AIAssistant {
         }
     }
 
+    // MARK: - Recette (acceptance test plan)
+
+    /// Enriches the deterministic recette seeds into concrete manual test cases. The model
+    /// gets the brief (source of truth), the deliverable, the task list and coverage, plus the
+    /// seeds as a backbone. Returns nil on any failure/empty → the caller renders the seeds
+    /// alone (graceful degradation). The app renders the returned items; the model never writes HTML.
+    static func buildRecette(featureName: String,
+                             briefMarkdown: String,
+                             deliverableMarkdown: String,
+                             taskTitles: [String],
+                             coverageSummary: String?,
+                             seeds: [RecetteItem],
+                             apiKey: String?) async -> [RecetteItem]? {
+        var budget = 14_000
+        let briefClip = clip(briefMarkdown, &budget)
+        let delivClip = clip(deliverableMarkdown, &budget)
+        let seedList = seeds.map { "- [\($0.priority.label)] \($0.group) — \($0.title) · attendu: \($0.expected)" }
+            .joined(separator: "\n")
+        let cov = coverageSummary.map { "\nCouverture : \($0)" } ?? ""
+        let prompt = """
+        Tu écris la RECETTE (plan de test d'acceptation MANUEL) de la feature « \(featureName) » qu'Atelier vient de livrer.
+        But : ce qu'un dev doit exécuter pour VALIDER la feature. En français, concret, actionnable.
+
+        Brief (source de vérité) :
+        \"\"\"
+        \(briefClip)
+        \"\"\"
+
+        Deliverable :
+        \"\"\"
+        \(delivClip)
+        \"\"\"
+
+        Tâches livrées : \(taskTitles.isEmpty ? "(aucune)" : taskTitles.joined(separator: ", "))\(cov)
+
+        Squelette déterministe déjà dérivé (ENRICHIS-le : garde la couverture des critères d'acceptation en p0, \
+        ajoute des ÉTAPES concrètes, fusionne les doublons — n'invente pas de features absentes du brief) :
+        \(seedList)
+
+        Règles :
+        - Chaque critère d'acceptation → un item priorité "p0", étapes concrètes pour l'exercer, "expected" = le critère.
+        - Contraintes/contournements → "p1" ; zones peu couvertes → "p1" ; support/tâches → "p2".
+        - "group" : thème lisible (ex. "Critères d'acceptation", "Contraintes & contournements", "Couverture", "Parcours", "Régression").
+        - "steps" : impératif, 1 à 5 étapes concrètes. "expected" : condition de succès observable. "hint" : optionnel (null sinon).
+        - Pas de préambule ni de fences. Réponds UNIQUEMENT cet objet JSON :
+
+        {"items":[{"id":"ac1","group":"Critères d'acceptation","title":"...","priority":"p0","validates":"...","steps":["..."],"expected":"...","hint":null}]}
+        """
+        guard let raw = try? await askJSON(prompt: prompt, model: ModelRouter.latestOpus,
+                                           maxTurns: 2, apiKey: apiKey) else { return nil }
+        let items = (try? parseRecetteItems(raw)) ?? []
+        return items.isEmpty ? nil : items
+    }
+
+    /// Tolerant parse of the recette JSON (internal → unit-tested). Missing ids are backfilled,
+    /// bad priorities default to p1, blank-titled items are dropped.
+    static func parseRecetteItems(_ raw: String) throws -> [RecetteItem] {
+        let stripped = stripCodeFences(raw)
+        let jsonText: String
+        if let lo = stripped.firstIndex(of: "{"), let hi = stripped.lastIndex(of: "}"), lo < hi {
+            jsonText = String(stripped[lo...hi])
+        } else { jsonText = stripped }
+        guard let data = jsonText.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let arr = obj["items"] as? [[String: Any]] else {
+            throw Error.badResponse
+        }
+        return arr.enumerated().compactMap { (i, dict) -> RecetteItem? in
+            guard let title = (dict["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty else { return nil }
+            let prio = RecetteItem.Priority(rawValue: (dict["priority"] as? String ?? "").lowercased()) ?? .p1
+            let steps = ((dict["steps"] as? [Any]) ?? [])
+                .compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            let rawId = (dict["id"] as? String)?.trimmingCharacters(in: .whitespaces)
+            let hint = (dict["hint"] as? String)?.trimmingCharacters(in: .whitespaces)
+            let group = (dict["group"] as? String)?.trimmingCharacters(in: .whitespaces)
+            return RecetteItem(
+                id: (rawId?.isEmpty ?? true) ? "ri\(i + 1)" : rawId!,
+                group: (group?.isEmpty ?? true) ? "À vérifier" : group!,
+                title: title,
+                priority: prio,
+                validates: (dict["validates"] as? String)?.trimmingCharacters(in: .whitespaces) ?? "",
+                steps: steps.isEmpty ? ["À vérifier."] : steps,
+                expected: (dict["expected"] as? String)?.trimmingCharacters(in: .whitespaces) ?? "",
+                hint: (hint?.isEmpty ?? true) ? nil : hint)
+        }
+    }
+
     // MARK: - Attachment context
 
     /// A base64 PNG ready to drop into a stream-json `image` content block.

@@ -810,6 +810,43 @@ final class FeatureBuildRunner {
             try? await deps.store.updateFeature(id: fid) { $0.deliverablePath = path }
         }
         logger.notice("feature synthesis wrote \(url.lastPathComponent, privacy: .public)")
+
+        // Auto-generate the interactive acceptance test plan ("recette") next to the deliverable.
+        await writeRecette(run: run, deps: deps, merged: merged, coverageStr: coverageStr)
+    }
+
+    /// Renders the feature's recette (acceptance test plan) HTML at the project root. Hybrid:
+    /// deterministic seeds from the brief/tasks/coverage, enriched by the agent when possible,
+    /// falling back to the seeds. Best-effort — a failure never affects the run/deliverable.
+    private func writeRecette(run: AutopilotRun, deps: Deps, merged: [AtelierTask], coverageStr: String?) async {
+        guard let fid = run.featureId, let feature = deps.store.featureByID(fid) else { return }
+        let featureName = feature.name
+        let projectPath = deps.project.path
+        let briefText: String = {
+            guard let roomId = feature.briefRoomId, let room = deps.store.chatRoom(id: roomId) else { return "" }
+            return (try? String(contentsOf: room.briefFileURL, encoding: .utf8)) ?? ""
+        }()
+        let brief = briefText.isEmpty ? nil : BriefDocument.parse(briefText)
+        let deliverableText = run.deliverablePath
+            .flatMap { try? String(contentsOfFile: $0, encoding: .utf8) } ?? ""
+        let taskTitles = merged.map(\.title)
+        let coverage = CoverageReport.find(in: projectPath)
+        let seeds = RecetteBuilder.deterministicSeeds(
+            brief: brief, taskTitles: taskTitles, coverage: coverage,
+            coverageTarget: modeProfile(deps).build.coverageTarget, featureName: featureName)
+        // Hybrid enrichment; nil → render the deterministic seeds alone.
+        let enriched = await AIAssistant.buildRecette(
+            featureName: featureName, briefMarkdown: briefText, deliverableMarkdown: deliverableText,
+            taskTitles: taskTitles, coverageSummary: coverageStr, seeds: seeds, apiKey: deps.apiKey)
+        let items = enriched ?? seeds
+        let note = "Généré par Atelier — \(items.count) points · \(enriched == nil ? "socle déterministe" : "enrichi par l'agent")."
+        do {
+            let recetteURL = try RecetteBuilder.write(featureName: featureName, projectName: deps.project.name,
+                                                      projectPath: projectPath, items: items, generatedNote: note)
+            logger.notice("recette written \(recetteURL.lastPathComponent, privacy: .public)")
+        } catch {
+            logger.warning("recette write failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// One-line review rollup across the merged tasks, from the per-task reports collected during
