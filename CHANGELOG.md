@@ -6,6 +6,8 @@ All notable changes to Atelier are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.0.0-beta.1] — 2026-07-05
+
 ### Added
 
 - **MCP capability layer** — a local stdio MCP server (`AtelierMCPServer`) is handed to every
@@ -126,6 +128,24 @@ All notable changes to Atelier are documented here. The format is based on
 - **Live progress on the main board.** Task cards on the project board show the MCP progress % and
   the block reason (previously only the feature-flow kanban did).
 - Routing warnings are keyed by feature (no longer leak across features/projects).
+
+- **Live-E2E hardening round** (found by running the flow end-to-end on real Node + Android apps):
+  - **Worker isolation** — task workers are confined to their git worktree (the shared project
+    root is no longer `--add-dir`'d, which had let workers write there and break the serial merge).
+  - **Post-merge regression now auto-fixes** — a cross-task collision (e.g. two tasks declaring the
+    same symbol) runs a bounded fix loop on the integration branch before blocking, so a fixable
+    regression doesn't strand the dependency chain.
+  - **Blocked tasks are actionable** — a "Pourquoi bloqué ?" popover (reason + full report with the
+    build/compiler output) and a one-tap "Débloquer & relancer".
+  - **Runtime-prerequisite hints** — per-mode reminders the unit gate can't catch (Android network
+    features need the INTERNET manifest permission), woven into the decompose + worker prompts.
+  - **Android coverage is measured + honest** — a JaCoCo `coverageCommand` (was missing, so coverage
+    never surfaced) with the Compose UI/theme/Activity excluded so the number reflects testable logic.
+  - **Coverage setup lands on a dedicated branch** — never committed to the user's (protected) branch
+    directly; merged on demand.
+  - **Brief chat stays authoring-only** — a hard scope + a Stop button, so it can't drift into
+    (fruitless) implementation and burn turns.
+  - Smaller: live decompose status (current step + timer); an inline app-build-command field.
 
 ## [1.0.0-alpha.5] — 2026-07-01
 
