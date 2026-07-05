@@ -34,6 +34,7 @@ struct FeatureFlowView: View {
     @State private var decomposeError: String?
     @State private var decomposeActivity: String?   // latest live step (repo-inspect path emits these)
     @State private var decomposeStart: Date?        // for the elapsed timer while decomposing
+    @State private var buildCmdDraft = ""           // inline entry for the optional app-build command
     @State private var inspectRepo = true
     @State private var quickAddTitle = ""
     // ⑤ Finish
@@ -420,9 +421,22 @@ struct FeatureFlowView: View {
                 Text("Command: \(cmd)").font(AtelierFont.eyebrow)
                     .foregroundStyle(Color.atelierInkSecondary).textSelection(.enabled)
             } else {
-                Text("This mode has no build command — app build unavailable; unit tests still gate.")
+                Text("This mode has no build command — the optional app build is off (unit tests still gate). Add one to enable it:")
                     .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            // Always offer to set (or override) the build command — a mode with none can enable
+            // the optional app build; a mode that has one can point it at a different command.
+            HStack(spacing: 6) {
+                TextField(cmd == nil ? "e.g. npm run build" : "override the build command", text: $buildCmdDraft)
+                    .textFieldStyle(.roundedBorder).font(AtelierFont.captionMono)
+                    .onSubmit { saveVerifyBuildCommand() }
+                Button(cmd == nil ? "Set" : "Update") { saveVerifyBuildCommand() }
+                    .controlSize(.small)
+                    .disabled(buildCmdDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                if cmd != nil, store.projectByID(project.id)?.verifyBuildCommand?.isEmpty == false {
+                    Button("Clear") { clearVerifyBuildCommand() }.controlSize(.small)
+                }
             }
         }
         .padding(10).frame(maxWidth: .infinity, alignment: .leading)
@@ -437,6 +451,20 @@ struct FeatureFlowView: View {
                 if let final { p.buildVerifyFinal = final }
             }
         }
+    }
+
+    /// Saves a custom app-build command on the project (persisted) so the optional app-build
+    /// verification becomes available even for modes with no built-in build command.
+    private func saveVerifyBuildCommand() {
+        let cmd = buildCmdDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cmd.isEmpty else { return }
+        Task { try? await store.updateProject(id: project.id) { $0.verifyBuildCommand = cmd } }
+    }
+
+    /// Clears the custom build command (reverts to the mode's built-in one, if any).
+    private func clearVerifyBuildCommand() {
+        buildCmdDraft = ""
+        Task { try? await store.updateProject(id: project.id) { $0.verifyBuildCommand = nil } }
     }
 
     @ViewBuilder
