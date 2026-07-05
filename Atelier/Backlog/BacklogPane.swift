@@ -493,6 +493,8 @@ private struct KanbanColumn: View {
             task: task,
             run: spawner.activeRun(for: task.id),
             autopilotPhase: featureRunner.run(for: project.id)?.taskPhases[task.id],
+            progress: store.taskProgress[task.id],
+            blockedReason: store.taskBlockedReason[task.id],
             isSelected: selectedTaskID == task.id,
             canSpawn: canSpawn(task: task),
             onTap: { selectedTaskID = task.id },
@@ -628,6 +630,8 @@ private struct TaskCard: View {
     let task: AtelierTask
     let run: ActiveRun?
     let autopilotPhase: TaskPhase?
+    let progress: AppStore.TaskProgress?
+    let blockedReason: String?
     let isSelected: Bool
     let canSpawn: Bool
     let onTap: () -> Void
@@ -679,6 +683,23 @@ private struct TaskCard: View {
                                 .font(AtelierFont.captionMono)
                                 .foregroundStyle(Color.atelierInkSecondary)
                         }
+                    }
+
+                    // Live MCP progress ping (feature workers report it over the bridge).
+                    if let progress, task.status != .done {
+                        HStack(spacing: 6) {
+                            ProgressView(value: Double(progress.pct), total: 100)
+                                .frame(width: 56)
+                            Text("\(progress.pct)%\(progress.note.map { " · \($0)" } ?? "")")
+                                .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                                .lineLimit(1).truncationMode(.tail)
+                        }
+                    }
+                    // Reason a worker signalled blocked (task_signal_blocked / autopilot block).
+                    if task.status == .blocked, let blockedReason, !blockedReason.isEmpty {
+                        Text(blockedReason)
+                            .font(AtelierFont.eyebrow).foregroundStyle(Palette.warning)
+                            .lineLimit(2).multilineTextAlignment(.leading)
                     }
 
                     if !task.labels.isEmpty {

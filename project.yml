@@ -63,6 +63,7 @@ targets:
       - package: Yams
         product: Yams
       - target: AtelierApprovalHelper
+      - target: AtelierMCPServer
     postBuildScripts:
       # Place the approval helper next to the main binary in Contents/MacOS, where
       # MCPConfig.helperPath() looks for it. This Run Script is a build phase, so it
@@ -81,6 +82,19 @@ targets:
           - "$(BUILT_PRODUCTS_DIR)/AtelierApprovalHelper"
         outputFiles:
           - "$(BUILT_PRODUCTS_DIR)/$(PRODUCT_NAME).app/Contents/MacOS/AtelierApprovalHelper"
+      # Same manual-copy dance for the MCP capability server (XcodeGen's `embed`
+      # mislocates a `tool` product into Contents/Resources). Sealed into the
+      # bundle before code-sign; carries its own AtelierMCPServer signature.
+      - name: Embed AtelierMCPServer into bundle
+        script: |
+          set -e
+          DEST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/MacOS"
+          mkdir -p "$DEST"
+          cp -f "${BUILT_PRODUCTS_DIR}/AtelierMCPServer" "$DEST/AtelierMCPServer"
+        inputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/AtelierMCPServer"
+        outputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/$(PRODUCT_NAME).app/Contents/MacOS/AtelierMCPServer"
 
   AtelierApprovalHelper:
     type: tool
@@ -95,6 +109,40 @@ targets:
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "-"
 
+  # Stdio MCP capability server handed to feature-scoped workers via --mcp-config.
+  # Zero packages (mirrors the helper): it must NOT open GRDB — the app is the
+  # single writer, reached over the Unix socket. The shared MCP protocol/core
+  # files are compiled into this target AND the app (so AtelierTests can cover them).
+  AtelierMCPServer:
+    type: tool
+    platform: macOS
+    sources:
+      - path: AtelierMCPServer
+      - path: Atelier/MCP/MCPProtocol.swift
+      - path: Atelier/MCP/MCPBridgeProtocol.swift
+      - path: Atelier/MCP/MCPServerCore.swift
+    settings:
+      base:
+        PRODUCT_NAME: AtelierMCPServer
+        SKIP_INSTALL: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+
+  AtelierTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: AtelierTests
+    dependencies:
+      - target: Atelier
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.atelier.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Atelier.app/Contents/MacOS/Atelier"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
 schemes:
   Atelier:
     build:
@@ -104,6 +152,8 @@ schemes:
       config: Debug
     test:
       config: Debug
+      targets:
+        - AtelierTests
     profile:
       config: Release
     analyze:

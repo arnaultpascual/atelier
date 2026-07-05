@@ -324,6 +324,10 @@ enum AIAssistant {
         var workerModel: String?      // raw model id (nil = use project default)
         var ref: String?              // model-assigned ref ("t1") for dependency wiring
         var dependsOnRefs: [String] = []   // refs of tasks this one needs done first
+        /// Attachment FILENAMES (from the brief's shared files) the decomposer assigned to
+        /// this task — e.g. the mockup image routed to the UI task. Copied into the task's
+        /// own attachment folder at creation so the worker physically receives them.
+        var attachments: [String] = []
     }
 
     /// Opus 4.8 decomposer. Takes a free-form brief / spec / dump and emits
@@ -347,12 +351,17 @@ enum AIAssistant {
             : existingTitles.prefix(20).map { "- \($0)" }.joined(separator: "\n")
 
         let att = buildAttachmentContext(attachments)
+        let attachmentNames = attachments.map(\.lastPathComponent)
         let attachmentSection = att.isEmpty ? "" : """
 
 
-        Reference attachments (the user added these as extra context). Treat them as source \
-        material and EXTRACT every relevant detail INTO the task descriptions, so each task is \
-        self-contained — a worker only ever sees its own task, never these attachments.
+        Reference attachments (the user shared these with the brief). Treat them as source \
+        material: EXTRACT every relevant detail INTO the task descriptions, AND — since a file \
+        can be physically handed to a worker — ASSIGN each attachment (by exact filename) to the \
+        task(s) whose worker must SEE it, via that task's `attachments` field. Example: a UI \
+        mockup image goes on the task that implements that screen; an API spec PDF goes on the \
+        endpoint task. A file may be assigned to several tasks; leave `attachments: []` where none apply.
+        Available attachment filenames: \(attachmentNames.joined(separator: ", "))
         \(att.images.isEmpty ? "" : "\(att.images.count) image(s) are attached to this message — read them.")
         \(att.text.isEmpty ? "" : "Extracted text from attachments:\n\(att.text)")
         \(att.skipped.isEmpty ? "" : "Could not read (ignore these): \(att.skipped.joined(separator: "; ")).")
@@ -389,7 +398,8 @@ enum AIAssistant {
             This project uses STRICT TDD. Every task's "## Acceptance criteria" MUST require writing \
             the test(s) FIRST and the test command above passing green. Atelier runs that command in \
             the worktree and blocks review/merge on a non-zero exit. Do NOT require building/assembling \
-            the full app to verify — rely on unit tests (the app build is opt-in and may be slow).
+            the full app to verify — rely on unit tests (the app build is opt-in and may be slow).\
+            \(b.runtimeHint.map { "\n\nRUNTIME must-haves for \(profile.name) — these COMPILE and pass unit tests but only fail when the app RUNS, so the gate can't catch them. Make sure a task explicitly OWNS each one:\n- \($0)" } ?? "")
             """
         } else {
             modeSection = ""
@@ -450,6 +460,8 @@ enum AIAssistant {
         - priority: low | medium | high | critical.
         - labels: lowercase, ≤ 3, from profile suggestions when relevant.
         - depends_on: ids this task needs done first ([] if independent).
+        - attachments: exact filenames (from the attachment list above, if any) this task's \
+        worker must SEE — e.g. the mockup for the screen it implements. [] if none.
         - suggested_model: one of
             claude-opus-4-8              (refactors / multi-file / architectural / ambiguous)
             claude-sonnet-4-6            (default for feature work)
@@ -466,6 +478,7 @@ enum AIAssistant {
               "priority": "medium",
               "labels": ["..."],
               "depends_on": [],
+              "attachments": [],
               "suggested_model": "claude-sonnet-4-6"
             }
           ]
@@ -500,7 +513,8 @@ enum AIAssistant {
         return try parseTaskDrafts(raw)
     }
 
-    private static func parseTaskDrafts(_ raw: String) throws -> [TaskDraft] {
+    // Internal (not private) so the tolerant parsing — incl. the attachments field — is unit-testable.
+    static func parseTaskDrafts(_ raw: String) throws -> [TaskDraft] {
         let stripped = stripCodeFences(raw)
         // The model sometimes wraps the JSON in prose or a partial answer (e.g.
         // after hitting the turn limit). Pull out the outermost {...} and parse
@@ -531,6 +545,9 @@ enum AIAssistant {
             let deps = ((dict["depends_on"] as? [Any]) ?? [])
                 .compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
+            let attachmentNames = ((dict["attachments"] as? [Any]) ?? [])
+                .compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
             return TaskDraft(
                 title: String(title.prefix(120)),
                 descriptionMd: description,
@@ -538,8 +555,98 @@ enum AIAssistant {
                 labels: labels.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty },
                 workerModel: model,
                 ref: (ref?.isEmpty ?? true) ? nil : ref,
-                dependsOnRefs: deps
+                dependsOnRefs: deps,
+                attachments: attachmentNames
             )
+        }
+    }
+
+    // MARK: - Recette (acceptance test plan)
+
+    /// Enriches the deterministic recette seeds into concrete manual test cases. The model
+    /// gets the brief (source of truth), the deliverable, the task list and coverage, plus the
+    /// seeds as a backbone. Returns nil on any failure/empty → the caller renders the seeds
+    /// alone (graceful degradation). The app renders the returned items; the model never writes HTML.
+    static func buildRecette(featureName: String,
+                             briefMarkdown: String,
+                             deliverableMarkdown: String,
+                             taskTitles: [String],
+                             coverageSummary: String?,
+                             seeds: [RecetteItem],
+                             apiKey: String?) async -> [RecetteItem]? {
+        var budget = 14_000
+        let briefClip = clip(briefMarkdown, &budget)
+        let delivClip = clip(deliverableMarkdown, &budget)
+        let seedList = seeds.map { "- [\($0.priority.label)] \($0.group) — \($0.title) · attendu: \($0.expected)" }
+            .joined(separator: "\n")
+        let cov = coverageSummary.map { "\nCouverture : \($0)" } ?? ""
+        let prompt = """
+        Tu écris la RECETTE (plan de test d'acceptation MANUEL) de la feature « \(featureName) » qu'Atelier vient de livrer.
+        But : ce qu'un dev doit exécuter pour VALIDER la feature. En français, concret, actionnable.
+
+        Brief (source de vérité) :
+        \"\"\"
+        \(briefClip)
+        \"\"\"
+
+        Deliverable :
+        \"\"\"
+        \(delivClip)
+        \"\"\"
+
+        Tâches livrées : \(taskTitles.isEmpty ? "(aucune)" : taskTitles.joined(separator: ", "))\(cov)
+
+        Squelette déterministe déjà dérivé (ENRICHIS-le : garde la couverture des critères d'acceptation en p0, \
+        ajoute des ÉTAPES concrètes, fusionne les doublons — n'invente pas de features absentes du brief) :
+        \(seedList)
+
+        Règles :
+        - Chaque critère d'acceptation → un item priorité "p0", étapes concrètes pour l'exercer, "expected" = le critère.
+        - Contraintes/contournements → "p1" ; zones peu couvertes → "p1" ; support/tâches → "p2".
+        - "group" : thème lisible (ex. "Critères d'acceptation", "Contraintes & contournements", "Couverture", "Parcours", "Régression").
+        - "steps" : impératif, 1 à 5 étapes concrètes. "expected" : condition de succès observable. "hint" : optionnel (null sinon).
+        - Pas de préambule ni de fences. Réponds UNIQUEMENT cet objet JSON :
+
+        {"items":[{"id":"ac1","group":"Critères d'acceptation","title":"...","priority":"p0","validates":"...","steps":["..."],"expected":"...","hint":null}]}
+        """
+        guard let raw = try? await askJSON(prompt: prompt, model: ModelRouter.latestOpus,
+                                           maxTurns: 2, apiKey: apiKey) else { return nil }
+        let items = (try? parseRecetteItems(raw)) ?? []
+        return items.isEmpty ? nil : items
+    }
+
+    /// Tolerant parse of the recette JSON (internal → unit-tested). Missing ids are backfilled,
+    /// bad priorities default to p1, blank-titled items are dropped.
+    static func parseRecetteItems(_ raw: String) throws -> [RecetteItem] {
+        let stripped = stripCodeFences(raw)
+        let jsonText: String
+        if let lo = stripped.firstIndex(of: "{"), let hi = stripped.lastIndex(of: "}"), lo < hi {
+            jsonText = String(stripped[lo...hi])
+        } else { jsonText = stripped }
+        guard let data = jsonText.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let arr = obj["items"] as? [[String: Any]] else {
+            throw Error.badResponse
+        }
+        return arr.enumerated().compactMap { (i, dict) -> RecetteItem? in
+            guard let title = (dict["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty else { return nil }
+            let prio = RecetteItem.Priority(rawValue: (dict["priority"] as? String ?? "").lowercased()) ?? .p1
+            let steps = ((dict["steps"] as? [Any]) ?? [])
+                .compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            let rawId = (dict["id"] as? String)?.trimmingCharacters(in: .whitespaces)
+            let hint = (dict["hint"] as? String)?.trimmingCharacters(in: .whitespaces)
+            let group = (dict["group"] as? String)?.trimmingCharacters(in: .whitespaces)
+            return RecetteItem(
+                id: (rawId?.isEmpty ?? true) ? "ri\(i + 1)" : rawId!,
+                group: (group?.isEmpty ?? true) ? "À vérifier" : group!,
+                title: title,
+                priority: prio,
+                validates: (dict["validates"] as? String)?.trimmingCharacters(in: .whitespaces) ?? "",
+                steps: steps.isEmpty ? ["À vérifier."] : steps,
+                expected: (dict["expected"] as? String)?.trimmingCharacters(in: .whitespaces) ?? "",
+                hint: (hint?.isEmpty ?? true) ? nil : hint)
         }
     }
 

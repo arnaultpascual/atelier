@@ -18,6 +18,9 @@ struct Feature: Identifiable, Hashable, Codable, Sendable, FetchableRecord, Muta
     var briefRoomId: String?
     /// The autopilot run's integration branch, once the build stage has started.
     var integrationBranch: String?
+    /// The branch the integration branch was cut from — the target "Merge & finish" merges INTO.
+    /// Persisted (unlike the in-memory run) so finishing works after an app relaunch.
+    var baseBranch: String?
     /// `FEATURE-<slug>.md` at the project root, once the finish stage produced it.
     var deliverablePath: String?
     /// Set when the feature is fully finished (deliverable produced + integration merged).
@@ -77,6 +80,7 @@ struct Feature: Identifiable, Hashable, Codable, Sendable, FetchableRecord, Muta
         static let stage = Column(CodingKeys.stage)
         static let briefRoomId = Column(CodingKeys.briefRoomId)
         static let integrationBranch = Column(CodingKeys.integrationBranch)
+        static let baseBranch = Column(CodingKeys.baseBranch)
         static let deliverablePath = Column(CodingKeys.deliverablePath)
         static let completedAt = Column(CodingKeys.completedAt)
         static let createdAt = Column(CodingKeys.createdAt)
@@ -91,6 +95,7 @@ struct Feature: Identifiable, Hashable, Codable, Sendable, FetchableRecord, Muta
                        stage: .prerequisites,
                        briefRoomId: nil,
                        integrationBranch: nil,
+                       baseBranch: nil,
                        deliverablePath: nil,
                        completedAt: nil,
                        createdAt: now,

@@ -20,14 +20,28 @@ struct FeatureFlowView: View {
 
     @State private var viewedStage: Feature.Stage
     @State private var toolchain: ToolchainChecker.Report?
+    // Coverage tooling enablement (prerequisites): detect + optionally wire.
+    @State private var coverageStatus: CoverageEnablement.Status?
+    @State private var wiringCoverage = false
+    @State private var coverageNote: String?
+    // Coverage is wired on a dedicated Atelier branch (never committed to the user's branch, esp. a
+    // protected main, without an explicit merge). These hold the pending setup branch + its base.
+    @State private var coverageSetupBranch: String?
+    @State private var coverageSetupBase: String?
     @State private var advancing = false
     // ③ Tasks
     @State private var decomposing = false
     @State private var decomposeError: String?
+    @State private var decomposeActivity: String?   // latest live step (repo-inspect path emits these)
+    @State private var decomposeStart: Date?        // for the elapsed timer while decomposing
+    @State private var buildCmdDraft = ""           // inline entry for the optional app-build command
+    @State private var reasonPopoverTaskID: String? // which blocked card's "why" popover is open
     @State private var inspectRepo = true
     @State private var quickAddTitle = ""
     // ⑤ Finish
+    @State private var briefRoomError: String?
     @State private var deliverableMarkdown: String?
+    @State private var deliverableUnreadable = false
     @State private var finalizing = false
     @State private var mergeError: String?
 
@@ -65,6 +79,7 @@ struct FeatureFlowView: View {
         .background(Color.atelierBackground)
         .task(id: viewedStage) {
             await loadToolchainIfNeeded()
+            await loadCoverageStatus()
             await ensureBriefRoomIfNeeded()
         }
         .task(id: deliverableLoadKey) { loadDeliverable() }
@@ -73,8 +88,15 @@ struct FeatureFlowView: View {
     /// Reload the deliverable when we enter Finish or when the synthesis writes/updates its path.
     private var deliverableLoadKey: String { "\(viewedStage.rawValue)|\(live.deliverablePath ?? "")" }
     private func loadDeliverable() {
-        guard viewedStage == .finish, let path = live.deliverablePath else { deliverableMarkdown = nil; return }
-        deliverableMarkdown = try? String(contentsOfFile: path, encoding: .utf8)
+        guard viewedStage == .finish, let path = live.deliverablePath else {
+            deliverableMarkdown = nil; deliverableUnreadable = false; return
+        }
+        if let md = try? String(contentsOfFile: path, encoding: .utf8) {
+            deliverableMarkdown = md; deliverableUnreadable = false
+        } else {
+            // Path recorded but the file is gone/unreadable — surface it instead of an eternal spinner.
+            deliverableMarkdown = nil; deliverableUnreadable = true
+        }
     }
 
     // MARK: Header + stepper
@@ -185,7 +207,48 @@ struct FeatureFlowView: View {
                     CalloutBanner(.info, "Toolchain ready — the build can run this mode's tests.")
                 }
             }
+            coverageCallout
             advanceBar(primaryTitle: ready ? "Continue to Brief" : "Continue anyway")
+        }
+    }
+
+    /// Coverage-tooling enablement: when the mode supports coverage but it isn't wired,
+    /// offer a one-time, opt-in setup so `coverage_get` / the dossier have a real report.
+    @ViewBuilder private var coverageCallout: some View {
+        if wiringCoverage {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text("Wiring coverage tooling…").font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
+            }
+        } else {
+            // Note (success / "commit first" / failure) shown above; the Wire button
+            // stays reachable as long as coverage is still missing (retry-safe).
+            if let note = coverageNote { CalloutBanner(.info, note) }
+            if case .missing(let tool)? = coverageStatus {
+                VStack(alignment: .leading, spacing: 8) {
+                    if coverageNote == nil {
+                        CalloutBanner(.info, "Coverage isn't configured for this \(profile.name) project. Wire \(tool) so the build can measure coverage vs the soft 90% aim (data-driven TDD). Optional — it never blocks you.")
+                    }
+                    HStack(spacing: 8) {
+                        Button {
+                            wireCoverage()
+                        } label: {
+                            Label(coverageSetupBranch == nil ? "Wire \(tool) coverage" : "Re-wire", systemImage: "chart.bar.doc.horizontal")
+                        }
+                        .buttonStyle(.bordered).controlSize(.small)
+                        // After wiring, the coverage lives on a dedicated Atelier branch — merge it
+                        // into the base (refused on a protected base → merge by hand / PR).
+                        if coverageSetupBranch != nil {
+                            Button {
+                                mergeCoverageSetup()
+                            } label: {
+                                Label("Merger le setup", systemImage: "arrow.triangle.merge")
+                            }
+                            .buttonStyle(.borderedProminent).controlSize(.small)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -194,10 +257,16 @@ struct FeatureFlowView: View {
         VStack(alignment: .leading, spacing: 16) {
             stageHeading(.brief)
             if let roomId = live.briefRoomId, store.chatRoom(id: roomId) != nil {
-                PreparePromptView(store: store, chatSpawner: chatSpawner, project: project, pinnedBriefId: roomId)
+                PreparePromptView(store: store, chatSpawner: chatSpawner, project: project, pinnedBriefId: roomId, featureId: live.id)
                     .frame(height: 600)
                     .background(Color.atelierSurface.opacity(0.25), in: RoundedRectangle(cornerRadius: AtelierCorner.card))
                     .overlay(RoundedRectangle(cornerRadius: AtelierCorner.card).stroke(Color.atelierDivider, lineWidth: 1))
+            } else if let err = briefRoomError {
+                VStack(spacing: 10) {
+                    CalloutBanner(.danger, "Couldn't set up the brief workspace: \(err)")
+                    Button("Retry") { Task { await ensureBriefRoomIfNeeded() } }.controlSize(.small)
+                }
+                .frame(maxWidth: .infinity, minHeight: 200)
             } else {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
@@ -237,6 +306,7 @@ struct FeatureFlowView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent).disabled(decomposing || !briefReady)
+                    decomposeStatusLine
                     if !briefReady {
                         Text("Write the brief first (stage ②).").font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
                     }
@@ -257,9 +327,16 @@ struct FeatureFlowView: View {
                     .buttonStyle(.plain).foregroundStyle(Color.atelierAccent).disabled(decomposing)
                     .help("Generate more tasks from the brief (adds to the list).")
                 }
+                decomposeStatusLine
                 VStack(spacing: 8) { ForEach(featureTasks) { featureTaskRow($0) } }
                 quickAddRow
                 if let err = decomposeError { CalloutBanner(.danger, err) }
+                // Attachment-routing warnings from the last decompose (unmatched names,
+                // failed copies) — a task must never silently lose its mockup.
+                let routingWarnings = store.attachmentWarnings(featureId: feature.id)
+                if !routingWarnings.isEmpty {
+                    CalloutBanner(.warning, routingWarnings.joined(separator: "\n"))
+                }
             }
             advanceBar(primaryTitle: "Continue to Build", canAdvance: !featureTasks.isEmpty)
         }
@@ -345,9 +422,22 @@ struct FeatureFlowView: View {
                 Text("Command: \(cmd)").font(AtelierFont.eyebrow)
                     .foregroundStyle(Color.atelierInkSecondary).textSelection(.enabled)
             } else {
-                Text("This mode has no build command — app build unavailable; unit tests still gate.")
+                Text("This mode has no build command — the optional app build is off (unit tests still gate). Add one to enable it:")
                     .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            // Always offer to set (or override) the build command — a mode with none can enable
+            // the optional app build; a mode that has one can point it at a different command.
+            HStack(spacing: 6) {
+                TextField(cmd == nil ? "e.g. npm run build" : "override the build command", text: $buildCmdDraft)
+                    .textFieldStyle(.roundedBorder).font(AtelierFont.captionMono)
+                    .onSubmit { saveVerifyBuildCommand() }
+                Button(cmd == nil ? "Set" : "Update") { saveVerifyBuildCommand() }
+                    .controlSize(.small)
+                    .disabled(buildCmdDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                if cmd != nil, store.projectByID(project.id)?.verifyBuildCommand?.isEmpty == false {
+                    Button("Clear") { clearVerifyBuildCommand() }.controlSize(.small)
+                }
             }
         }
         .padding(10).frame(maxWidth: .infinity, alignment: .leading)
@@ -362,6 +452,20 @@ struct FeatureFlowView: View {
                 if let final { p.buildVerifyFinal = final }
             }
         }
+    }
+
+    /// Saves a custom app-build command on the project (persisted) so the optional app-build
+    /// verification becomes available even for modes with no built-in build command.
+    private func saveVerifyBuildCommand() {
+        let cmd = buildCmdDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cmd.isEmpty else { return }
+        Task { try? await store.updateProject(id: project.id) { $0.verifyBuildCommand = cmd } }
+    }
+
+    /// Clears the custom build command (reverts to the mode's built-in one, if any).
+    private func clearVerifyBuildCommand() {
+        buildCmdDraft = ""
+        Task { try? await store.updateProject(id: project.id) { $0.verifyBuildCommand = nil } }
     }
 
     @ViewBuilder
@@ -394,12 +498,20 @@ struct FeatureFlowView: View {
                 }
             } else {
                 let projectBusy = featureRunner.isProjectBusy(project.id)
+                // Tasks left mid-flight (e.g. app quit during a build — runs are in-memory and gone
+                // on relaunch) sit .inProgress with no run, so nothing is runnable and Start is
+                // disabled: a dead end without this reset.
+                let stuck = featureTasks.filter { $0.status == .inProgress }
                 Image(systemName: "infinity").foregroundStyle(Color.atelierAccent)
                 Text(projectBusy ? "Another build is running for this project — one at a time (they share the repo)."
-                     : (runnable.isEmpty ? "No runnable task — add tasks in the Tasks stage."
-                                         : "\(featureTasks.count) task\(featureTasks.count == 1 ? "" : "s") ready to build."))
+                     : (!stuck.isEmpty ? "\(stuck.count) task\(stuck.count == 1 ? " was" : "s were") left mid-build (e.g. after a relaunch). Reset \(stuck.count == 1 ? "it" : "them") to re-run."
+                        : (runnable.isEmpty ? "No runnable task — add tasks in the Tasks stage."
+                                            : "\(featureTasks.count) task\(featureTasks.count == 1 ? "" : "s") ready to build.")))
                     .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
                 Spacer()
+                if !stuck.isEmpty, !projectBusy {
+                    Button("Reset \(stuck.count) stuck") { resetStuckTasks(stuck) }.controlSize(.small)
+                }
                 Button(action: { startFeatureAutopilot(featureTasks) }) {
                     Label("Start autopilot", systemImage: "play.fill").fontWeight(.semibold)
                 }
@@ -452,6 +564,36 @@ struct FeatureFlowView: View {
                         Text(phase.label).font(.system(size: 9)).foregroundStyle(phaseColor(phase)).lineLimit(1)
                     }
                 }
+                // Live progress reported by the worker over the MCP capability bridge.
+                if let prog = store.taskProgress[t.id] {
+                    HStack(spacing: 4) {
+                        Text("\(prog.pct)%")
+                            .font(.system(size: 9, weight: .semibold)).monospacedDigit()
+                            .foregroundStyle(Color.atelierAccent)
+                        if let note = prog.note, !note.isEmpty {
+                            Text(note).font(.system(size: 9))
+                                .foregroundStyle(Color.atelierInkSecondary).lineLimit(1)
+                        }
+                    }
+                }
+                // Blocked: a concise "why" (popover — the full report is one click deeper) and a
+                // one-tap "I fixed it → unblock & re-run".
+                if t.status == .blocked {
+                    HStack(spacing: 12) {
+                        Button { reasonPopoverTaskID = t.id } label: {
+                            Label("Pourquoi bloqué ?", systemImage: "questionmark.circle").font(.system(size: 9, weight: .medium))
+                        }
+                        .buttonStyle(.plain).foregroundStyle(Palette.error)
+                        .popover(isPresented: Binding(get: { reasonPopoverTaskID == t.id },
+                                                      set: { if !$0 { reasonPopoverTaskID = nil } })) {
+                            blockedReasonPopover(t)
+                        }
+                        Button { unblockAndResume(t) } label: {
+                            Label("Débloquer & relancer", systemImage: "arrow.clockwise").font(.system(size: 9, weight: .medium))
+                        }
+                        .buttonStyle(.plain).foregroundStyle(Color.atelierAccent)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
         }
@@ -493,6 +635,8 @@ struct FeatureFlowView: View {
             stageHeading(.finish)
             if let md = deliverableMarkdown {
                 deliverablePanel(md)
+            } else if deliverableUnreadable, let path = live.deliverablePath {
+                CalloutBanner(.danger, "The deliverable file couldn't be read at \((path as NSString).abbreviatingWithTildeInPath) — it may have been moved or deleted. Re-run the Build stage to regenerate it.")
             } else if live.deliverablePath != nil {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
@@ -501,6 +645,7 @@ struct FeatureFlowView: View {
             } else {
                 CalloutBanner(.info, "The deliverable (FEATURE-<slug>.md at the project root) is generated automatically when the autopilot finishes. Complete the Build stage first.")
             }
+            recettePanel
             finalizePanel
         }
     }
@@ -528,6 +673,30 @@ struct FeatureFlowView: View {
                     .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
                     .lineLimit(1).truncationMode(.middle)
             }
+        }
+    }
+
+    /// The auto-generated acceptance test plan (recette), if synthesis produced it. Opens the
+    /// self-contained HTML in the default browser; committable, shareable with the PR.
+    private var recetteURL: URL { RecetteBuilder.recetteURL(projectPath: project.path, featureName: live.name) }
+    @ViewBuilder
+    private var recettePanel: some View {
+        if FileManager.default.fileExists(atPath: recetteURL.path) {
+            HStack(spacing: 8) {
+                Image(systemName: "checklist").foregroundStyle(Color.atelierAccent)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Recette de test").font(AtelierFont.caption.weight(.medium)).foregroundStyle(Color.atelierInk)
+                    Text("Ce qu'il faut vérifier pour valider la feature — page interactive, committée avec la branche.")
+                        .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                }
+                Spacer(minLength: 8)
+                Button("Ouvrir la recette") { NSWorkspace.shared.open(recetteURL) }
+                    .buttonStyle(.borderedProminent).controlSize(.small)
+                Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting([recetteURL]) }.controlSize(.small)
+            }
+            .padding(11)
+            .background(Color.atelierSurface.opacity(0.4), in: RoundedRectangle(cornerRadius: AtelierCorner.card))
+            .overlay(RoundedRectangle(cornerRadius: AtelierCorner.card).stroke(Color.atelierDivider, lineWidth: 1))
         }
     }
 
@@ -602,6 +771,26 @@ struct FeatureFlowView: View {
         .padding(.top, 8)
     }
 
+    /// Live status under the Decompose button: the current step (repo-inspect emits real lines like
+    /// "Reading cart.js" / "Grep …"; otherwise a generic label) + an elapsed timer, so a long
+    /// decompose shows it's actually working, not stuck.
+    @ViewBuilder private var decomposeStatusLine: some View {
+        if decomposing {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles").font(.system(size: 9)).foregroundStyle(Color.atelierAccent)
+                Text(decomposeActivity ?? "Analyse du brief…")
+                    .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                    .lineLimit(1).truncationMode(.middle)
+                if let decomposeStart {
+                    Text(decomposeStart, style: .timer)
+                        .font(AtelierFont.eyebrow.monospacedDigit())
+                        .foregroundStyle(Color.atelierInkSecondary.opacity(0.7))
+                }
+            }
+            .transition(.opacity)
+        }
+    }
+
     private var advanceHint: String {
         switch viewedStage {
         case .brief: return "Write or refine the brief first."
@@ -619,8 +808,14 @@ struct FeatureFlowView: View {
     /// Lazily create + link this feature's brief room when the user reaches the Brief stage.
     private func ensureBriefRoomIfNeeded() async {
         guard viewedStage == .brief, live.briefRoomId == nil else { return }
-        guard let room = try? await store.createBriefRoom(projectId: project.id) else { return }
-        try? await store.updateFeature(id: feature.id) { $0.briefRoomId = room.id }
+        do {
+            let room = try await store.createBriefRoom(projectId: project.id)
+            try await store.updateFeature(id: feature.id) { $0.briefRoomId = room.id }
+            await MainActor.run { briefRoomError = nil }
+        } catch {
+            // Surface it instead of an eternal "Setting up the brief workspace…" spinner.
+            await MainActor.run { briefRoomError = error.localizedDescription }
+        }
     }
 
     // MARK: ③ Tasks actions
@@ -634,25 +829,45 @@ struct FeatureFlowView: View {
         guard !brief.isEmpty else { return }
         decomposing = true
         decomposeError = nil
+        decomposeActivity = nil
+        decomposeStart = Date()
         let profileSnapshot = profile
         let projectSnapshot = project
         // Dedup within THIS feature — not the whole project — so it matches the feature-scoped write.
         let titles = store.tasks(inFeature: feature.id).map(\.title)
         let repoPath = inspectRepo ? project.path : nil
         let featureId = feature.id
+        // Live step ticker (fed by the streaming/repo-inspect path).
+        let onActivity: @Sendable (String) async -> Void = { line in
+            await MainActor.run { decomposeActivity = line }
+        }
         Task {
+            // Shared brief files (mockups, specs) — the decomposer SEES them and assigns each
+            // to the task(s) that need it; createTasks then copies them into those tasks.
+            // Scanned off the click path (directory I/O never blocks the button).
+            let sharedFiles = await Task.detached {
+                FeatureAttachments.list(projectRoot: projectSnapshot.path, featureId: featureId)
+            }.value
             do {
                 let drafts = try await AIAssistant.decomposeBrief(
                     brief, project: projectSnapshot, profile: profileSnapshot,
-                    existingTitles: titles, repoPath: repoPath)
+                    existingTitles: titles, attachments: sharedFiles, repoPath: repoPath,
+                    onActivity: onActivity)
                 guard !drafts.isEmpty else {
-                    await MainActor.run { decomposing = false; decomposeError = "The decomposer returned no tasks — refine the brief and try again." }
+                    await MainActor.run {
+                        decomposing = false; decomposeStart = nil; decomposeActivity = nil
+                        decomposeError = "The decomposer returned no tasks — refine the brief and try again."
+                    }
                     return
                 }
-                _ = try await store.createTasks(fromDrafts: drafts, in: projectSnapshot, featureId: featureId)
-                await MainActor.run { decomposing = false }
+                _ = try await store.createTasks(fromDrafts: drafts, in: projectSnapshot,
+                                                featureId: featureId, attachmentSources: sharedFiles)
+                await MainActor.run { decomposing = false; decomposeStart = nil; decomposeActivity = nil }
             } catch {
-                await MainActor.run { decomposing = false; decomposeError = "Decomposition failed: \(error.localizedDescription)" }
+                await MainActor.run {
+                    decomposing = false; decomposeStart = nil; decomposeActivity = nil
+                    decomposeError = "Decomposition failed: \(error.localizedDescription)"
+                }
             }
         }
     }
@@ -682,21 +897,37 @@ struct FeatureFlowView: View {
         }
     }
 
-    /// Merge the feature's integration branch into the currently checked-out branch (guarding
-    /// protected branches, aborting cleanly on conflict), then mark the feature completed.
+    /// Merge the feature's integration branch INTO the base it was cut from (checking that base
+    /// out first — the autopilot leaves us ON the integration branch, so merging into "current"
+    /// would be a no-op self-merge that still marked the feature done). Guards protected branches,
+    /// aborts cleanly on conflict, then marks the feature completed.
     private func mergeAndFinish() {
         guard let branch = live.integrationBranch, !branch.isEmpty else { return }
         finalizing = true; mergeError = nil
         let projectPath = project.path
+        let persistedBase = live.baseBranch
         Task {
             do {
-                let base = try await GitService.currentBranch(projectPath: projectPath)
+                let current = try await GitService.currentBranch(projectPath: projectPath)
+                // Prefer the persisted base; fall back to the current branch only if we have nothing.
+                let base = (persistedBase?.isEmpty == false) ? persistedBase! : current
+                guard base != branch else {
+                    await MainActor.run {
+                        finalizing = false
+                        mergeError = "Couldn't determine the base branch to merge “\(branch)” into. Check out your target branch, then merge \(branch) by hand."
+                    }
+                    return
+                }
                 if GitService.protectedBranches.contains(base.lowercased()) {
                     await MainActor.run {
                         finalizing = false
-                        mergeError = "You're on protected branch “\(base)”. Check out your integration/feature branch, or merge \(branch) by hand."
+                        mergeError = "The base branch “\(base)” is protected — Atelier won't merge onto it. Merge \(branch) into \(base) by hand."
                     }
                     return
+                }
+                // Get onto the base branch before merging (we're on the integration branch now).
+                if current != base {
+                    try await GitService.checkoutBranch(projectPath: projectPath, branch: base)
                 }
                 let result = try await GitService.merge(into: base, branch: branch, projectPath: projectPath)
                 switch result {
@@ -707,11 +938,61 @@ struct FeatureFlowView: View {
                     try? await GitService.abortMerge(projectPath: projectPath)
                     await MainActor.run {
                         finalizing = false
-                        mergeError = "Merge conflicts in \(files.count) file(s). Aborted — merge \(branch) into \(base) by hand."
+                        mergeError = "Merge conflicts in \(files.count) file(s) merging \(branch) → \(base). Aborted — finish the merge by hand."
                     }
                 }
             } catch {
                 await MainActor.run { finalizing = false; mergeError = error.localizedDescription }
+            }
+        }
+    }
+
+    /// Concise "why is this blocked" — the block reason (readable, selectable), with the full
+    /// report (build/compiler output) one click deeper. Lighter than opening the report outright.
+    @ViewBuilder
+    private func blockedReasonPopover(_ t: AtelierTask) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("BLOQUÉ — POURQUOI").font(AtelierFont.eyebrow.weight(.semibold)).foregroundStyle(Palette.error)
+            ScrollView {
+                Text(store.taskBlockedReason[t.id] ?? "Raison non conservée (après un relaunch). Le rapport garde le détail complet.")
+                    .font(AtelierFont.caption).foregroundStyle(Color.atelierInk)
+                    .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 180)
+            let report = URL(fileURLWithPath: project.path).appendingPathComponent(".atelier/autopilot/\(t.id).md")
+            if FileManager.default.fileExists(atPath: report.path) {
+                Divider()
+                Button("Voir le rapport complet (sortie build) →") { NSWorkspace.shared.open(report) }
+                    .buttonStyle(.plain).font(AtelierFont.eyebrow).foregroundStyle(Color.atelierAccent)
+            }
+        }
+        .padding(14).frame(width: 340)
+    }
+
+    /// "I fixed it" — reset a blocked task to To Do (clearing its block), then re-run the autopilot.
+    /// The re-run cuts a fresh integration branch off the current HEAD (which carries all prior
+    /// merges), so the now-runnable task + any dependents that waited on it build on the accumulated
+    /// foundation rather than from scratch.
+    private func unblockAndResume(_ t: AtelierTask) {
+        reasonPopoverTaskID = nil
+        Task {
+            try? await store.updateTaskStatus(t, to: .toDo)
+            await store.clearBlockedReason(taskId: t.id)
+            await store.clearProgress(taskId: t.id)
+            await MainActor.run {
+                featureRunner.clearRun(featureId: feature.id)
+                startFeatureAutopilot(store.tasks(inFeature: feature.id))
+            }
+        }
+    }
+
+    /// Resets tasks stranded `.inProgress` (a run that never finished — e.g. app quit mid-build)
+    /// back to To Do so the autopilot can pick them up again. Clears their transient progress badge.
+    private func resetStuckTasks(_ tasks: [AtelierTask]) {
+        Task {
+            for t in tasks {
+                try? await store.updateTaskStatus(t, to: .toDo)
+                await store.clearProgress(taskId: t.id)
             }
         }
     }
@@ -737,5 +1018,105 @@ struct FeatureFlowView: View {
             toolchain = nil; return
         }
         toolchain = await ToolchainChecker.check(profile: profile, projectPath: project.path)
+    }
+
+    private func loadCoverageStatus() async {
+        guard viewedStage == .prerequisites else { coverageStatus = nil; coverageNote = nil; return }
+        coverageNote = nil   // drop any stale success/failure note on (re)entry so the button returns
+        let profile = self.profile
+        let path = project.path
+        // Bounded filesystem scan — keep it off the main actor.
+        coverageStatus = await Task.detached { CoverageEnablement.status(profile: profile, projectPath: path) }.value
+    }
+
+    /// Merges the pending coverage-setup branch into its base. Refuses a protected base (the user
+    /// merges it by hand / via PR — Atelier never writes to a protected branch), mirroring
+    /// `mergeAndFinish`. On success, re-probes so the callout flips to "wired".
+    private func mergeCoverageSetup() {
+        guard let setup = coverageSetupBranch, let base = coverageSetupBase else { return }
+        coverageNote = nil
+        let projectPath = project.path
+        Task { @MainActor in
+            if GitService.protectedBranches.contains(base.lowercased()) {
+                coverageNote = "« \(base) » est protégée — merge « \(setup) » dans « \(base) » à la main (ou via PR). Le setup est prêt sur cette branche."
+                return
+            }
+            do {
+                let current = try await GitService.currentBranch(projectPath: projectPath)
+                if current != base { try await GitService.checkoutBranch(projectPath: projectPath, branch: base) }
+                let result = try await GitService.merge(into: base, branch: setup, projectPath: projectPath)
+                switch result {
+                case .clean, .upToDate:
+                    coverageSetupBranch = nil; coverageSetupBase = nil
+                    await loadCoverageStatus()   // now on base with coverage → flips to .wired
+                    coverageNote = "Coverage mergé dans « \(base) » ✓."
+                case .conflict(let files):
+                    try? await GitService.abortMerge(projectPath: projectPath)
+                    coverageNote = "Conflits sur \(files.count) fichier(s) en mergeant \(setup) → \(base). Annulé — merge à la main."
+                }
+            } catch {
+                coverageNote = "Merge du setup échoué : \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Wires the mode's coverage tooling on a DEDICATED Atelier branch (never on the user's branch
+    /// directly): cut `atelier/coverage-setup-<hex>` off HEAD, commit Atelier's scaffold there, run
+    /// the setup worker there, return to the base branch, then offer "Merger le setup". Opt-in.
+    private func wireCoverage() {
+        guard !wiringCoverage, let instructions = CoverageEnablement.setupInstructions(profile: profile) else { return }
+        // Never wire while a build/synthesis run is active — the repo is on the integration branch
+        // and serial merges touch the index; cutting a branch + committing would race them.
+        guard !featureRunner.isProjectBusy(project.id) else {
+            coverageNote = "A build is running on this project — wait for it to finish, then wire coverage."
+            return
+        }
+        wiringCoverage = true
+        coverageNote = nil
+        coverageSetupBranch = nil; coverageSetupBase = nil
+        let prompt = """
+        You are wiring code-coverage tooling into this project as a one-time setup. Work in the current directory (the project root), on the branch that is currently checked out. This is infrastructure only.
+
+        \(instructions)
+
+        Do ONLY the above — do not modify application code or existing tests. Stage ONLY the specific files you changed, by path; do NOT run `git add -A`, `git add .`, or `git commit -am`, and do NOT push, merge, or rebase. Then `git commit` with a clear message.
+        """
+        // Enforced fence: even on Atelier's own setup branch, the worker must not push/merge/rebase/reset.
+        let denyGitWrite = [PermissionRule(tool: "Bash",
+                                           pattern: "re:^git (push|merge|rebase|reset)( |$)",
+                                           behavior: .deny,
+                                           reason: "Coverage setup must never push/merge/rebase",
+                                           scope: .run)]
+        let projectPath = project.path
+        let setupBranch = "atelier/coverage-setup-\(UUID().uuidString.prefix(8))"
+        Task { @MainActor in
+            do {
+                let base = try await GitService.currentBranch(projectPath: projectPath)
+                // Dedicated Atelier branch: nothing lands on the user's branch (esp. a protected main)
+                // without an explicit merge. `checkout -b` carries the dirty scaffold over onto it.
+                try await GitService.createIntegrationBranch(projectPath: projectPath, branch: setupBranch)
+                // Capture ONLY Atelier's own scaffold (never the user's other work) as a clean commit.
+                try? await GitService.commit(paths: [".gitignore", "backlog", ".atelier/config.yml"],
+                                             message: "chore: Atelier setup", projectPath: projectPath)
+                // Run the setup worker ON the setup branch (it commits the coverage config there).
+                let outcome = await spawner.runManagedWorker(
+                    label: "coverage-setup", prompt: prompt, workingDirectory: projectPath,
+                    project: project, model: ModelRouter.latestOpus, apiKey: APIKeyResolver.resolve(),
+                    store: store, server: server, approvalQueue: approvalQueue, maxTurns: 40,
+                    featureId: live.id, extraDenyRules: denyGitWrite)
+                // Return to the base branch so the repo isn't stranded on the setup branch; the
+                // coverage config lives on `setupBranch` until the user merges it.
+                try? await GitService.checkoutBranch(projectPath: projectPath, branch: base)
+                wiringCoverage = false
+                coverageSetupBase = base
+                coverageSetupBranch = setupBranch
+                coverageNote = outcome.completed
+                    ? "Coverage wired on branch « \(setupBranch) ». Review it, then « Merger le setup » into « \(base) »."
+                    : "Coverage setup didn't complete\(outcome.looksUsageLimited ? " (usage limit)" : "") on « \(setupBranch) » — inspect/merge it or re-wire. Never blocks the build."
+            } catch {
+                wiringCoverage = false
+                coverageNote = "Couldn't set up the coverage branch: \(error.localizedDescription)"
+            }
+        }
     }
 }

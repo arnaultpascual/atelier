@@ -25,6 +25,50 @@ final class AppStore {
     private(set) var chatRooms: [ChatRoom] = []
     private(set) var isLoaded: Bool = false
 
+    /// Live, EPHEMERAL per-task build progress reported by workers over the MCP
+    /// capability bridge. Not persisted (no migration, no git/frontmatter churn);
+    /// resets on relaunch. SwiftUI reads `taskProgress[taskId]` for a live %.
+    struct TaskProgress: Sendable, Equatable {
+        var pct: Int
+        var note: String?
+        var updatedAt: Date
+    }
+    private(set) var taskProgress: [String: TaskProgress] = [:]
+
+    /// Records a worker's progress ping (clamped 0–100). Observation-driven → the
+    /// kanban updates live. No DB write.
+    func reportProgress(taskId: String, pct: Int, note: String?) {
+        taskProgress[taskId] = TaskProgress(pct: max(0, min(100, pct)),
+                                            note: note,
+                                            updatedAt: Date())
+    }
+
+    /// Clears a task's transient progress (e.g. once it merges/completes).
+    func clearProgress(taskId: String) {
+        taskProgress[taskId] = nil
+    }
+
+    /// Ephemeral block reasons reported via `task_signal_blocked` (the status flip
+    /// to .blocked is the durable signal; the reason is transient, no migration).
+    private(set) var taskBlockedReason: [String: String] = [:]
+    func setBlockedReason(taskId: String, reason: String) { taskBlockedReason[taskId] = reason }
+    func clearBlockedReason(taskId: String) { taskBlockedReason[taskId] = nil }
+
+    /// Bumped whenever the MCP bridge writes a feature's living brief.md, so an
+    /// open PreparePromptView preview reloads live (keyed by chat-room id). Not
+    /// persisted — purely a UI refresh signal.
+    private(set) var briefRevision: [String: Int] = [:]
+    func bumpBriefRevision(roomId: String) { briefRevision[roomId, default: 0] += 1 }
+
+    /// Ephemeral warnings from the last `createTasks` attachment routing (unmatched
+    /// decomposer-assigned names, failed copies, ambiguous duplicate basenames) —
+    /// surfaced in the tasks UI so a task can never silently lose its mockup. Keyed by
+    /// featureId (the loose Fill-Kanban flow uses ""), so a decompose in one feature can't
+    /// clobber the banner another feature is showing. Reset per key on each `createTasks`.
+    private(set) var attachmentRoutingWarnings: [String: [String]] = [:]
+    /// Routing warnings from the most recent decompose into `featureId` (empty if none).
+    func attachmentWarnings(featureId: String) -> [String] { attachmentRoutingWarnings[featureId] ?? [] }
+
     private var observationTask: Task<Void, Never>?
 
     init() {
@@ -332,6 +376,10 @@ final class AppStore {
         try await db.write { db in
             _ = try Feature.filter(Feature.Columns.id == feature.id).deleteAll(db)
         }
+        // Clean the feature's shared-files store — otherwise mockups/PDFs are orphaned forever.
+        if let project = projectByID(feature.projectId) {
+            FeatureAttachments.removeAll(projectRoot: project.path, featureId: feature.id)
+        }
     }
 
     // MARK: - Task queries
@@ -399,12 +447,16 @@ final class AppStore {
     }
 
     /// Persists a batch of `AIAssistant.TaskDraft`s in two passes: create every task (recording each
-    /// draft's ref → real id), then resolve `depends_on` refs to real ids. Shared by Fill Kanban and
-    /// the feature flow's decompose stage. `featureId` stamps every created task (feature-first flow).
+    /// draft's ref → real id), then resolve `depends_on` refs to real ids and copy any decomposer-
+    /// assigned attachments (matched by filename against `attachmentSources` — e.g. the feature's
+    /// shared brief files) into each task's own folder, so the worker physically receives them.
+    /// Shared by Fill Kanban and the feature flow's decompose stage. `featureId` stamps every
+    /// created task (feature-first flow).
     @discardableResult
     func createTasks(fromDrafts drafts: [AIAssistant.TaskDraft],
                      in project: Project,
-                     featureId: String? = nil) async throws -> [AtelierTask] {
+                     featureId: String? = nil,
+                     attachmentSources: [URL] = []) async throws -> [AtelierTask] {
         var refToId: [String: String] = [:]
         var created: [(draft: AIAssistant.TaskDraft, task: AtelierTask)] = []
         for draft in drafts {
@@ -421,15 +473,64 @@ final class AppStore {
             if let ref = draft.ref { refToId[ref] = task.id }
             created.append((draft, task))
         }
-        for entry in created where !entry.draft.dependsOnRefs.isEmpty {
+        // Second pass: deps + assigned attachments in ONE write per task (a split write from
+        // the same snapshot would clobber whichever field landed first). File copies run OFF
+        // the main actor in one batch, and every routing failure — an assigned name that
+        // matches no shared file, or a copy that throws — is surfaced as a warning: a task
+        // must never silently lose its mockup.
+        var warnings: [String] = []
+        for dupe in FeatureAttachments.duplicateBasenames(in: attachmentSources) {
+            warnings.append("Several shared files are named “\(dupe)” — only the first can be routed to tasks; rename the others to disambiguate.")
+        }
+        struct Route { let index: Int; let deps: [String]; let files: [URL]; let unmatched: [String] }
+        var routes: [Route] = []
+        for (i, entry) in created.enumerated() {
             let deps = entry.draft.dependsOnRefs
                 .compactMap { refToId[$0] }
                 .filter { $0 != entry.task.id }
-            guard !deps.isEmpty else { continue }
-            var t = entry.task
-            t.dependsOn = Array(Set(deps))
-            try await updateTask(t)
+            let files = FeatureAttachments.match(names: entry.draft.attachments, in: attachmentSources)
+            let matchedNames = Set(files.map { $0.lastPathComponent.lowercased() })
+            let unmatched = entry.draft.attachments.filter {
+                !matchedNames.contains(($0 as NSString).lastPathComponent.lowercased())
+            }
+            guard !deps.isEmpty || !files.isEmpty || !unmatched.isEmpty else { continue }
+            routes.append(Route(index: i, deps: deps, files: files, unmatched: unmatched))
         }
+        // Batch the synchronous copyItem calls off the main actor.
+        let projectPath = project.path
+        let copyPlan: [(taskId: String, files: [URL])] = routes.map { (created[$0.index].task.id, $0.files) }
+        let copyResults: [(relatives: [String], failures: [String])] = await Task.detached(priority: .userInitiated) {
+            copyPlan.map { plan in
+                var rels: [String] = []
+                var fails: [String] = []
+                for file in plan.files {
+                    do {
+                        rels.append(try AttachmentService.attach(sourceURL: file, taskId: plan.taskId,
+                                                                 projectRoot: projectPath))
+                    } catch {
+                        fails.append("\(file.lastPathComponent): \(error.localizedDescription)")
+                    }
+                }
+                return (rels, fails)
+            }
+        }.value
+        for (r, route) in routes.enumerated() {
+            var t = created[route.index].task
+            if !route.deps.isEmpty { t.dependsOn = Array(Set(route.deps)) }
+            let (relatives, failures) = copyResults[r]
+            for rel in relatives where !t.attachments.contains(rel) { t.attachments.append(rel) }
+            if !route.deps.isEmpty || !relatives.isEmpty { try await updateTask(t) }
+            for name in route.unmatched {
+                warnings.append("“\(t.title)”: assigned file “\(name)” doesn't match any shared file — not delivered to the worker.")
+            }
+            for failure in failures {
+                warnings.append("“\(t.title)”: couldn't copy \(failure)")
+            }
+        }
+        if !warnings.isEmpty {
+            logger.warning("attachment routing: \(warnings.joined(separator: " | "), privacy: .public)")
+        }
+        attachmentRoutingWarnings[featureId ?? ""] = warnings   // reset this scope's warnings every run
         return created.map(\.task)
     }
 
@@ -510,6 +611,12 @@ final class AppStore {
         if removeFile, let project = projectByID(task.projectId) {
             let abs = task.absoluteMdPath(projectRoot: project.path)
             try? FileManager.default.removeItem(atPath: abs)
+            // Clean the task's attachment folder too (same orphan gap as feature stores).
+            let attachmentsDir = URL(fileURLWithPath: project.path)
+                .appendingPathComponent(".atelier", isDirectory: true)
+                .appendingPathComponent("attachments", isDirectory: true)
+                .appendingPathComponent(task.id, isDirectory: true)
+            try? FileManager.default.removeItem(at: attachmentsDir)
         }
         try await db.write { db in
             _ = try AtelierTask.filter(AtelierTask.Columns.id == task.id).deleteAll(db)

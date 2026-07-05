@@ -4,6 +4,149 @@ All notable changes to Atelier are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.0.0-beta.1] — 2026-07-05
+
+### Added
+
+- **MCP capability layer** — a local stdio MCP server (`AtelierMCPServer`) is handed to every
+  feature-scoped worker via `--mcp-config`, giving Claude a typed API + on-demand context + a
+  real-time back-channel to Atelier's domain, on top of the file+git contract (which stays the
+  source of truth and fallback). It bridges to the running app over a Unix socket
+  (`AtelierBridgeListener`), so the app remains the single GRDB writer on `@MainActor`. Capability
+  only — the approval flow (hook / queue / worktree isolation) is untouched; the app auto-accepts
+  its own first-party `mcp__atelier__*` tools so they never hit the inbox.
+  - **Live build progress** — `task_report_progress` drives a live % on the kanban card (ephemeral,
+    no persistence).
+  - **Structured brief building** — `brief_set_overview` / `brief_add_requirement` /
+    `brief_add_acceptance_criterion` / `brief_add_open_question` / `brief_resolve_open_question` /
+    `brief_record_decision` / `brief_attach_reference` / `brief_append_section` serialize into the
+    canonical living `brief.md` (via the `BriefDocument` model). These operate in feature BUILD
+    spawns; the interactive Brief-stage chat keeps Claude as the sole writer of `brief.md` (no
+    two-writer race). The Prepare-Prompt preview refreshes live when the bridge writes the brief.
+  - **Always-referenceable spec** — `atelier://feature/{id}/spec` (and `/brief`) expose the living
+    brief as an MCP resource; `spec_record_finding` lets a worker record a discovered constraint +
+    workaround so other feature workers and reviewers see it.
+  - **Data-driven TDD** — `coverage_get` / `coverage_uncovered` report coverage vs the soft 90%
+    target across **swift, node, python, dotnet and android** (a multi-format Cobertura / LCOV /
+    json-summary / JaCoCo parser); `test_report_run` records an advisory run (it does NOT flip the
+    deterministic merge gate); `task_update_status` (Done reserved for merge), `task_signal_blocked`
+    (reason surfaced on the card), `task_get_dependencies`, `plan_next_wave`, and `review_request`
+    (runs the same Opus reviewer the autopilot uses) round out the surface.
+  - **Server-served prompts** — `atelier_decompose` / `atelier_refine_brief` / `atelier_review` /
+    `atelier_synthesize_feature` (faithful to Atelier's own `AIAssistant` prompts) are discoverable
+    via `prompts/list` + `prompts/get`.
+  - **Workers are taught to use the tools** — every feature-scoped build worker (and the iterate /
+    fix-loop worker, and the managed synthesis / coverage-improvement worker) now has its prompt
+    augmented with concrete guidance: report progress, consult the original spec before deviating,
+    record findings on discovered constraints, and check coverage before finishing. Without this the
+    capability sat dormant (tools present but unprompted).
+
+- **More project typologies, with real TDD gates + coverage** — the strict-TDD gate + coverage
+  previously existed only for Android and .NET; now the common code modes are fully wired:
+  - **Django** and **FastAPI** (new) — detected ahead of plain Python (manage.py / `django` /
+    `fastapi` dependency sniff); pytest gate + coverage.py (`pytest --cov` → Cobertura).
+  - **Python** (completed) — was detection-only; now a real pytest gate + pytest-cov coverage.
+  - **React (Vite)** (new) — React + TypeScript on Vite (not Next); the package.json detector fork
+    now orders next → react+vite → other-frontend → node.
+  - **Node.js / Next.js** (completed) — `npm test` gate + Vitest coverage setup.
+  - **Rust** (`cargo test` + cargo-llvm-cov→lcov) and **Go** (`go test` + gocover-cobertura→Cobertura)
+    completed; their coverage tools are global (surfaced in the toolchain preflight, no repo wiring).
+  - The autopilot's coverage-improvement round + dossier now read coverage **multi-format**
+    (Cobertura / LCOV / JaCoCo / json-summary), not just Cobertura — so coverage is data-driven
+    across all these modes, matching the MCP `coverage_get` tool. (Swift and a TS-library mode are
+    intentionally deferred — SwiftPM/Xcode duality and heuristic overlap respectively.)
+
+- **Brief attachments pipeline** — files shared during the Brief stage (mockups, spec PDFs,
+  screenshots) no longer evaporate after the message that carried them:
+  - They're **persisted with the feature** (`.atelier/attachments/feature-<id>/`) and shown in a
+    collapsible **FILES** section (chevron + image thumbnails) under the pinned folders in the
+    Brief stage, with per-file removal.
+  - At decompose time the decomposer **sees them and assigns each file to the task(s) whose worker
+    must see it** (a mockup → the screen task) via a new `attachments` field on task drafts; the
+    assigned files are **copied into those tasks' own attachment folders**, so the existing spawn
+    plumbing (`## Attachments` prompt section + `--add-dir`) physically delivers the mockup to the
+    Compose worker. The standalone Fill-Kanban flow routes the same way.
+  - A new MCP resource `atelier://feature/{id}/attachments` lists the shared files (name + path) so
+    any feature worker can discover and `Read` them (images render natively); worker guidance
+    mentions it.
+
+- **Coverage tooling enablement (prerequisites)** — the feature-flow Prerequisites step now detects
+  whether the project has coverage tooling wired for its mode and, if not, offers a **one-time,
+  opt-in** setup (its own commit) so `coverage_get` / the dossier have a real report to read. Per
+  mode via `ProjectProfile.CoverageSetup` (probe + self-contained wiring instructions): **Android →
+  JaCoCo**, **.NET → coverlet**. Detection is a pure, bounded filesystem scan (`CoverageEnablement`);
+  wiring is applied by a scoped setup worker — never a silent mutation of your build files. (node /
+  python / web / swift slot into the same mechanism as follow-on catalog entries.)
+  - Gated by an app-level kill-switch (`atelier.mcpCapabilityEnabled`, default on; set false to
+    disable). A missing/unreachable server degrades to the pure file+git contract. New `AtelierTests`
+    unit-test target added. Design + Phase 0 verification in `docs/mcp-capability.md`.
+
+- **Recette — auto-generated acceptance test plan.** When a feature finishes synthesis, Atelier
+  writes an interactive `FEATURE-<slug>-recette.html` at the project root: exactly what a dev
+  should run to validate the feature (checkboxes, priorities, progress, saved locally). Hybrid
+  generation — deterministic seeds from the brief's acceptance criteria + findings + coverage gaps
+  + tasks, enriched by an agent sub-step into concrete steps (graceful fallback to the seeds). A
+  "Ouvrir la recette" button in the Finish stage opens it; the file is committable and travels with
+  the branch. First shippable slice of the *Chantier Recette* idea. Design in `docs/feature-recette.md`.
+
+### Fixed
+
+- **Strict-TDD gate is now authoritative even when a worker self-promotes.** A worker calling
+  `task_update_status → Review` over MCP no longer skips the post-run test gate: Atelier runs the
+  mode's tests regardless and pulls a red task back to In Progress (green → Review). The manual /
+  board-spawn path had no second net before this.
+- **`task_signal_blocked` is now visible and honest.** The block reason survives the worker's
+  teardown (cleared at the next spawn instead), so it shows on the card; the autopilot reflects an
+  MCP-signalled block as a `.blocked` phase (was a phantom, permanent "building" spinner) and the
+  deliverable lists it. Autopilot-internal blocks now also show their reason on the card.
+- **Bridge mutations are feature-scoped.** A worker can only act on tasks in its own feature —
+  a caller-supplied `taskId` for a sibling wave task or another project is rejected (was unscoped).
+- **No more SIGPIPE app-kills / stale-fd writes.** `SIGPIPE` is ignored process-wide (app + MCP
+  server), accepted sockets set `SO_NOSIGPIPE`, `respond` only writes to the live client fd, the
+  prior client fd is closed on reconnect, and a malformed bridge request now gets an error reply
+  (was silence → a hung worker).
+- **Iterate no longer disables approvals.** A resumed (iterate) worker uses a fresh per-spawn
+  session identity, and a finishing run stays "live" through its test gate + teardown — so an
+  overlapping iterate can't reuse the same socket paths and have the old run's teardown unlink the
+  live session's approval socket (which silently turned auto-approve fully permissive).
+- **`review_request` hardened.** MCP tool calls get a 10-min timeout when the layer is attached (a
+  minutes-long Opus review no longer trips the default), and a second review of the same task is
+  refused while one is in flight.
+- **Parallel workers can't lose each other's brief findings.** All `brief_*` / `spec_record_finding`
+  writes to `brief.md` are serialized on the main actor (was an interleavable read-modify-write).
+- **Coverage wiring is reliable.** It's refused while a build is running on the project, the
+  clean-tree guard ignores untracked files (Atelier's own artifacts / a prior `FEATURE-*.md` no
+  longer falsely block it), and scaffolding now gitignores all of `.atelier/` (keeping `config.yml`).
+- **"Merge & finish" merges into the right branch.** The feature persists its base branch, so
+  finishing merges the integration branch INTO that base (was a no-op self-merge that still marked
+  the feature completed) — and works after an app relaunch. Schema migration `v13` (additive).
+- **No more dead ends:** stuck In-Progress tasks after a mid-build relaunch can be reset to To Do
+  from the Build stage; an unreadable deliverable shows an error instead of an eternal spinner; a
+  failed brief-workspace setup surfaces with a Retry.
+- **Live progress on the main board.** Task cards on the project board show the MCP progress % and
+  the block reason (previously only the feature-flow kanban did).
+- Routing warnings are keyed by feature (no longer leak across features/projects).
+
+- **Live-E2E hardening round** (found by running the flow end-to-end on real Node + Android apps):
+  - **Worker isolation** — task workers are confined to their git worktree (the shared project
+    root is no longer `--add-dir`'d, which had let workers write there and break the serial merge).
+  - **Post-merge regression now auto-fixes** — a cross-task collision (e.g. two tasks declaring the
+    same symbol) runs a bounded fix loop on the integration branch before blocking, so a fixable
+    regression doesn't strand the dependency chain.
+  - **Blocked tasks are actionable** — a "Pourquoi bloqué ?" popover (reason + full report with the
+    build/compiler output) and a one-tap "Débloquer & relancer".
+  - **Runtime-prerequisite hints** — per-mode reminders the unit gate can't catch (Android network
+    features need the INTERNET manifest permission), woven into the decompose + worker prompts.
+  - **Android coverage is measured + honest** — a JaCoCo `coverageCommand` (was missing, so coverage
+    never surfaced) with the Compose UI/theme/Activity excluded so the number reflects testable logic.
+  - **Coverage setup lands on a dedicated branch** — never committed to the user's (protected) branch
+    directly; merged on demand.
+  - **Brief chat stays authoring-only** — a hard scope + a Stop button, so it can't drift into
+    (fruitless) implementation and burn turns.
+  - Smaller: live decompose status (current step + timer); an inline app-build-command field.
+
 ## [1.0.0-alpha.5] — 2026-07-01
 
 Two headline features: a **.NET (C#) mode**, and a **feature-centric guided flow** that walks a

@@ -48,6 +48,14 @@ enum ProjectProfileDetector {
                 let devDeps = (obj["devDependencies"] as? [String: Any]) ?? [:]
                 let all = deps.merging(devDeps) { l, _ in l }
                 let frontendKeys = ["next", "react", "vue", "svelte", "nuxt", "astro", "remix", "@angular/core"]
+                // Order inside the fork is load-bearing: next → react+vite → other frontend → node.
+                if all["next"] != nil {
+                    return (profile(id: "web-nextjs"), ["package.json (next)"])
+                }
+                if (all["react"] != nil || all["react-dom"] != nil)
+                    && (all["vite"] != nil || all["@vitejs/plugin-react"] != nil) {
+                    return (profile(id: "react-vite"), ["package.json (react+vite)"])
+                }
                 if frontendKeys.contains(where: { all[$0] != nil }) {
                     return (profile(id: "web-nextjs"), ["package.json (frontend)"])
                 }
@@ -56,11 +64,23 @@ enum ProjectProfileDetector {
             return (profile(id: "node-backend"), ["package.json"])
         }
 
-        // Python
-        let pyMarkers = ["pyproject.toml", "setup.py", "requirements.txt", "Pipfile"]
+        // Python — django / fastapi sub-types first (need a dependency-manifest sniff),
+        // then plain python as the fallback.
+        let pyMarkers = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"]
         let pyHits = pyMarkers.filter(set.contains)
-        if !pyHits.isEmpty {
-            return (profile(id: "python"), pyHits)
+        if !pyHits.isEmpty || set.contains("manage.py") {
+            let manifests = ["pyproject.toml", "requirements.txt", "requirements-dev.txt", "Pipfile", "setup.cfg"]
+                .filter(set.contains).map { readText(url, $0) }.joined(separator: "\n")
+            // Django: manage.py (strong signal) or a `django` dependency (token-boundary
+            // match, so `django-cors-headers` / a comment substring don't false-trigger).
+            if set.contains("manage.py") || mentionsDependency(manifests, "django") {
+                return (profile(id: "django"), pyHits + (set.contains("manage.py") ? ["manage.py"] : []))
+            }
+            // FastAPI: a `fastapi` dependency (boundary match rejects `fastapi-utils` etc).
+            if mentionsDependency(manifests, "fastapi") {
+                return (profile(id: "fastapi"), pyHits + ["fastapi"])
+            }
+            if !pyHits.isEmpty { return (profile(id: "python"), pyHits) }
         }
 
         // Rust
@@ -84,6 +104,23 @@ enum ProjectProfileDetector {
 
     private static func profile(id: String) -> ProjectProfile {
         ProjectProfile.find(id: id) ?? ProjectProfile.generic
+    }
+
+    /// Reads a top-level file's contents (bounded, lowercased) for dependency sniffing.
+    /// Returns "" if absent/unreadable.
+    private static func readText(_ root: URL, _ name: String) -> String {
+        guard let data = try? Data(contentsOf: root.appendingPathComponent(name)) else { return "" }
+        return String(decoding: data.prefix(200_000), as: UTF8.self).lowercased()
+    }
+
+    /// True if `text` (already lowercased) names `dep` at a dependency-token boundary — so
+    /// `fastapi` matches `fastapi==0.1` / a bare line but NOT `fastapi-utils`, and `django`
+    /// matches a real dep but not `django-cors-headers`.
+    private static func mentionsDependency(_ text: String, _ dep: String) -> Bool {
+        guard let re = try? NSRegularExpression(pattern: "(^|[^a-z0-9_.-])\(dep)([^a-z0-9_.-]|$)") else {
+            return text.contains(dep)
+        }
+        return re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
     }
 
     private static func isCodeFile(_ name: String) -> Bool {

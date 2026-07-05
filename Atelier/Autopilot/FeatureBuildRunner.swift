@@ -236,10 +236,15 @@ final class FeatureBuildRunner {
                 run.integrationBranch = integration
                 run.originalBase = base        // remember where we branched from
                 run.baseBranch = integration   // task worktrees branch off this; merges land here
-                // Link the integration branch back to the feature so the flow's finish stage finds it.
+                // Link the integration branch + its base back to the feature so the flow's finish
+                // stage can merge into the RIGHT branch (the run is in-memory; this survives relaunch).
                 if let fid = run.featureId {
                     let branch = integration
-                    try? await deps.store.updateFeature(id: fid) { $0.integrationBranch = branch }
+                    let originalBase = base
+                    try? await deps.store.updateFeature(id: fid) {
+                        $0.integrationBranch = branch
+                        $0.baseBranch = originalBase
+                    }
                 }
             } else {
                 // Resume (e.g. after a usage-limit pause): the feature branch already exists.
@@ -342,10 +347,20 @@ final class FeatureBuildRunner {
             }
             return
         }
+        // A worker can signal blocked via MCP mid-build (status → .blocked). Reflect that in the
+        // run: set the .blocked phase (capturing the reason) so the card shows Blocked with a
+        // reason and the deliverable lists it — otherwise the phase stays .building forever (a
+        // phantom spinner) and the block is invisible to the dossier.
+        guard let latest = await deps.store.freshTask(task.id) else { return }
+        if latest.status == .blocked {
+            let reason = deps.store.taskBlockedReason[task.id] ?? "worker signalled blocked"
+            run.taskPhases[task.id] = .blocked(reason: reason)
+            return
+        }
         // The shared TDD gate (TaskSpawner.execute) promoted the task to .review iff its tests
         // passed. If it stayed In Progress, tests are red — fix them within the cap so red tasks
         // don't silently stall outside Phase B (which only picks up .review tasks).
-        guard let latest = deps.store.taskByID(task.id), latest.status == .inProgress else { return }
+        guard latest.status == .inProgress else { return }
         let profile = modeProfile(deps)
         guard !profile.build.fastTestCommands.isEmpty else {
             // No test command but somehow unpromoted — promote it so Phase B can review it.
@@ -619,10 +634,45 @@ final class FeatureBuildRunner {
                 toolchainMissing = true
                 await applyGate(task.id, deps: deps, state: .toolchainMissing, summary: result.summaryLine)
             } else if !result.passed {
-                await applyGate(task.id, deps: deps, state: .regressed,
-                                summary: "Post-merge regression: \(result.summaryLine)")
-                await block(task, "post-merge regression: \(result.summaryLine)", run: run, deps: deps)
-                return   // leave the worktree on disk for inspection
+                // Post-merge regression — usually a cross-task collision (two merged tasks touched
+                // the same symbol/file, e.g. a duplicate declaration). Attempt a bounded fix ON the
+                // integration branch in place, then re-test; only block if it's still red. A fix that
+                // lands leaves the task Done, so its dependents (which waited on it) become runnable
+                // again next wave — instead of a hard block that strands the whole dependency chain.
+                var fixed = result
+                var pass = 0
+                while !fixed.passed && !fixed.toolchainMissing && pass < maxFixPasses
+                        && run.status == .running && !overBudget(run) {
+                    pass += 1
+                    run.taskPhases[task.id] = .fixing(pass: pass)
+                    let tail = fixed.perCommand.first(where: { !$0.passed })
+                        .map { $0.stderrTail.isEmpty ? $0.stdoutTail : $0.stderrTail } ?? fixed.summaryLine
+                    let fixOutcome = await deps.spawner.runManagedWorker(
+                        label: "post-merge-fix",
+                        prompt: featureFixPrompt(tail),
+                        workingDirectory: deps.project.path,
+                        project: deps.project, model: ModelRouter.latestOpus, apiKey: deps.apiKey,
+                        store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue,
+                        featureId: run.featureId)
+                    run.costByTask[task.id, default: 0] += fixOutcome.costUsd
+                    if fixOutcome.looksUsageLimited { break }
+                    fixed = await TestRunner.runFastTests(profile: profile, worktreePath: deps.project.path, mainRepoPath: deps.project.path)
+                }
+                if fixed.passed {
+                    // Repaired → fall through to the success finalization (marks the task Done).
+                    summary = pass > 0 ? "\(outcome) — post-merge regression auto-fixed (\(pass) pass\(pass == 1 ? "" : "es"))" : result.summaryLine
+                } else {
+                    await applyGate(task.id, deps: deps, state: .regressed,
+                                    summary: "Post-merge regression: \(fixed.summaryLine)")
+                    // Full failing-command output so the report shows WHAT regressed.
+                    let failTail = fixed.perCommand.first(where: { !$0.passed }).map {
+                        ["$ \($0.command)", $0.stderrTail, $0.stdoutTail]
+                            .filter { !$0.isEmpty }.joined(separator: "\n")
+                    }
+                    await block(task, "post-merge regression not fixed after \(maxFixPasses) pass\(maxFixPasses == 1 ? "" : "es"): \(fixed.summaryLine)",
+                                run: run, deps: deps, detail: failTail)
+                    return   // leave the worktree on disk for inspection
+                }
             } else {
                 summary = result.summaryLine
             }
@@ -709,7 +759,8 @@ final class FeatureBuildRunner {
                     prompt: featureFixPrompt(result.summaryLine),
                     workingDirectory: deps.project.path,
                     project: deps.project, model: ModelRouter.latestOpus, apiKey: deps.apiKey,
-                    store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue)
+                    store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue,
+                    featureId: run.featureId)
                 run.synthesisCostUsd += outcome.costUsd
                 if outcome.looksUsageLimited { break }   // best-effort — don't pause the whole run for synthesis
                 result = await TestRunner.runFastTests(profile: profile, worktreePath: deps.project.path, mainRepoPath: deps.project.path)
@@ -732,7 +783,8 @@ final class FeatureBuildRunner {
                     prompt: featureBuildFixPrompt(cmd, String(tail.suffix(1500))),
                     workingDirectory: deps.project.path,
                     project: deps.project, model: ModelRouter.latestOpus, apiKey: deps.apiKey,
-                    store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue)
+                    store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue,
+                    featureId: run.featureId)
                 run.synthesisCostUsd += fix.costUsd
                 if fix.looksUsageLimited { break }
                 outcome = await TestRunner.runCommand(cmd, worktreePath: deps.project.path, profile: profile, mainRepoPath: deps.project.path)
@@ -762,7 +814,8 @@ final class FeatureBuildRunner {
                 prompt: coverageRoundPrompt(current: rate * 100, target: target),
                 workingDirectory: deps.project.path,
                 project: deps.project, model: ModelRouter.latestOpus, apiKey: deps.apiKey,
-                store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue)
+                store: deps.store, server: deps.server, approvalQueue: deps.approvalQueue,
+                featureId: run.featureId)
             run.synthesisCostUsd += outcome.costUsd
             if !outcome.looksUsageLimited {
                 let after = await TestRunner.runFastTests(profile: profile, worktreePath: deps.project.path, mainRepoPath: deps.project.path)
@@ -792,6 +845,43 @@ final class FeatureBuildRunner {
             try? await deps.store.updateFeature(id: fid) { $0.deliverablePath = path }
         }
         logger.notice("feature synthesis wrote \(url.lastPathComponent, privacy: .public)")
+
+        // Auto-generate the interactive acceptance test plan ("recette") next to the deliverable.
+        await writeRecette(run: run, deps: deps, merged: merged, coverageStr: coverageStr)
+    }
+
+    /// Renders the feature's recette (acceptance test plan) HTML at the project root. Hybrid:
+    /// deterministic seeds from the brief/tasks/coverage, enriched by the agent when possible,
+    /// falling back to the seeds. Best-effort — a failure never affects the run/deliverable.
+    private func writeRecette(run: AutopilotRun, deps: Deps, merged: [AtelierTask], coverageStr: String?) async {
+        guard let fid = run.featureId, let feature = deps.store.featureByID(fid) else { return }
+        let featureName = feature.name
+        let projectPath = deps.project.path
+        let briefText: String = {
+            guard let roomId = feature.briefRoomId, let room = deps.store.chatRoom(id: roomId) else { return "" }
+            return (try? String(contentsOf: room.briefFileURL, encoding: .utf8)) ?? ""
+        }()
+        let brief = briefText.isEmpty ? nil : BriefDocument.parse(briefText)
+        let deliverableText = run.deliverablePath
+            .flatMap { try? String(contentsOfFile: $0, encoding: .utf8) } ?? ""
+        let taskTitles = merged.map(\.title)
+        let coverage = CoverageReport.find(in: projectPath)
+        let seeds = RecetteBuilder.deterministicSeeds(
+            brief: brief, taskTitles: taskTitles, coverage: coverage,
+            coverageTarget: modeProfile(deps).build.coverageTarget, featureName: featureName)
+        // Hybrid enrichment; nil → render the deterministic seeds alone.
+        let enriched = await AIAssistant.buildRecette(
+            featureName: featureName, briefMarkdown: briefText, deliverableMarkdown: deliverableText,
+            taskTitles: taskTitles, coverageSummary: coverageStr, seeds: seeds, apiKey: deps.apiKey)
+        let items = enriched ?? seeds
+        let note = "Généré par Atelier — \(items.count) points · \(enriched == nil ? "socle déterministe" : "enrichi par l'agent")."
+        do {
+            let recetteURL = try RecetteBuilder.write(featureName: featureName, projectName: deps.project.name,
+                                                      projectPath: projectPath, items: items, generatedNote: note)
+            logger.notice("recette written \(recetteURL.lastPathComponent, privacy: .public)")
+        } catch {
+            logger.warning("recette write failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// One-line review rollup across the merged tasks, from the per-task reports collected during
@@ -843,10 +933,13 @@ final class FeatureBuildRunner {
         """
     }
 
-    private func block(_ task: AtelierTask, _ reason: String, run: AutopilotRun, deps: Deps) async {
+    private func block(_ task: AtelierTask, _ reason: String, run: AutopilotRun, deps: Deps, detail: String? = nil) async {
         logger.warning("autopilot blocked \(task.id, privacy: .public): \(reason, privacy: .public)")
-        writeAutopilotReport(task: task, project: deps.project, report: run.reportByTask[task.id], outcome: "Blocked — \(reason)")
+        writeAutopilotReport(task: task, project: deps.project, report: run.reportByTask[task.id], outcome: "Blocked — \(reason)", detail: detail)
         run.taskPhases[task.id] = .blocked(reason: reason)
+        // Mirror the reason onto the card too (same ephemeral channel MCP blocks use), so the
+        // kanban shows WHY every blocked task is blocked — not just autopilot-internal reports.
+        deps.store.setBlockedReason(taskId: task.id, reason: reason)
         // Preserve the task's just-written testState/testIntegrity by mutating the COMMITTED row
         // (the observation cache lags and would clobber e.g. .regressed back to .green).
         if var latest = await deps.store.freshTask(task.id) {
@@ -1025,11 +1118,16 @@ final class FeatureBuildRunner {
 
     /// Persists a human-readable per-task report to `<project>/.atelier/autopilot/<taskId>.md`,
     /// surfaced in the task detail so the review + outcome stay consultable after the run.
-    private func writeAutopilotReport(task: AtelierTask, project: Project, report: ReviewReport?, outcome: String) {
+    private func writeAutopilotReport(task: AtelierTask, project: Project, report: ReviewReport?, outcome: String, detail: String? = nil) {
         var md = "# Autopilot — \(task.title)\n\n"
         md += "- **Task:** `\(task.id)`\n"
         md += "- **Outcome:** \(outcome)\n"
         md += "- **When:** \(Date().formatted(date: .abbreviated, time: .shortened))\n\n"
+        // Full failure output (e.g. the gradle/compiler tail on a post-merge regression) so a
+        // blocked task is diagnosable — the card's one-liner never carries enough to act on.
+        if let detail, !detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            md += "## Failure output\n\n```\n\(detail.suffix(6000))\n```\n\n"
+        }
         if let report {
             md += "## Review\n\n**Verdict:** \(report.verdict.rawValue)\n\n"
             if !report.summary.isEmpty { md += "\(report.summary)\n\n" }

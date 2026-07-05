@@ -67,7 +67,40 @@ enum ToolchainChecker {
             let base = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
             out["PATH"] = dir + ":" + base
         }
+        // Same problem for the executable-probe modes (node/python/rust/go): a Finder-launched GUI
+        // app has the bare launchd PATH, but these tools live in ~/.cargo/bin, /usr/local/go/bin,
+        // ~/go/bin, a project venv, or homebrew — none guaranteed on that PATH. Prepend the concrete
+        // dirs (the SAME ones the probe scans, so probe and run agree) so the gate + the worker's own
+        // Bash can actually invoke cargo/go/pytest/node/npm.
+        let hasExecProbe = profile.build.requiredTools.contains {
+            if case .executable = $0.probe { return true }; return false
+        }
+        if hasExecProbe, out["PATH"] == nil {
+            let extra = extraToolDirs(repoPath: mainRepoPath)
+            if !extra.isEmpty {
+                let base = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+                out["PATH"] = (extra + [base]).joined(separator: ":")
+            }
+        }
         return out
+    }
+
+    /// Dirs where dev toolchains commonly land that the launchd PATH misses — homebrew, rustup, Go,
+    /// pip --user, and a project-local virtualenv. Only existing dirs, in priority order. Used by
+    /// BOTH the executable probe and the run-PATH export so the checker's verdict and the actual
+    /// test run agree on where cargo/go/pytest/node live.
+    static func extraToolDirs(repoPath: String) -> [String] {
+        let home = NSHomeDirectory()
+        var dirs = ["/opt/homebrew/bin", "/usr/local/bin",
+                    "\(home)/.cargo/bin", "/usr/local/go/bin", "\(home)/go/bin", "\(home)/.local/bin"]
+        for venv in [".venv/bin", "venv/bin", "env/bin"] {
+            dirs.append(URL(fileURLWithPath: repoPath).appendingPathComponent(venv).path)
+        }
+        let fm = FileManager.default
+        return dirs.filter {
+            var isDir: ObjCBool = false
+            return fm.fileExists(atPath: $0, isDirectory: &isDir) && isDir.boolValue
+        }
     }
 
     // MARK: - Probes
@@ -97,7 +130,9 @@ enum ToolchainChecker {
     /// under the inherited environment (TestRunner runs `/bin/sh -c` with `.inherit`).
     private static func resolveExecutable(_ name: String, projectPath: String) async -> String? {
         let fm = FileManager.default
-        for dir in ["/usr/bin", "/bin", "/opt/homebrew/bin", "/usr/local/bin"] {
+        // Standard dirs + the dev-toolchain dirs the run PATH also gets (kept in sync so the
+        // probe never says "present" for a tool the actual run can't find, and vice-versa).
+        for dir in ["/usr/bin", "/bin"] + extraToolDirs(repoPath: projectPath) {
             let p = "\(dir)/\(name)"
             if fm.isExecutableFile(atPath: p) { return p }
         }

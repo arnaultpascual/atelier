@@ -681,10 +681,11 @@ struct FillKanbanSheet: View {
 
     private func persistAll() {
         let snapshots = drafts
+        let sources = attachments   // route decomposer-assigned files into the created tasks
         saveError = nil
         Task {
             do {
-                try await store.createTasks(fromDrafts: snapshots, in: project)
+                try await store.createTasks(fromDrafts: snapshots, in: project, attachmentSources: sources)
                 await MainActor.run { onClose() }
             } catch {
                 await MainActor.run {

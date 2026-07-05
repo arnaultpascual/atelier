@@ -360,10 +360,34 @@ enum GitService {
     }
 
     /// True when the given repo's working tree has no uncommitted changes.
-    static func isClean(projectPath: String) async throws -> Bool {
-        let r = try await runGit(args: ["status", "--porcelain"], workingDirectory: projectPath)
+    /// `includeUntracked: false` (`-uno`) ignores untracked files — use it when the concern
+    /// is only the user's uncommitted TRACKED work (e.g. before a scoped setup commit), so
+    /// Atelier's own generated artifacts (a root `FEATURE-*.md`, `.atelier/…`) don't count.
+    static func isClean(projectPath: String, includeUntracked: Bool = true) async throws -> Bool {
+        var args = ["status", "--porcelain"]
+        if !includeUntracked { args.append("--untracked-files=no") }
+        let r = try await runGit(args: args, workingDirectory: projectPath)
         guard r.success else { throw Error.commandFailed("git status --porcelain", stderr: r.stderr) }
         return r.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Stages ONLY the given paths (those that exist) and commits them — never a blanket
+    /// `add -A`, so the user's other uncommitted work is left untouched. Returns false if
+    /// there was nothing of ours staged to commit. Used to land Atelier's own scaffold
+    /// (.gitignore / backlog / .atelier/config.yml) as a clean setup commit.
+    @discardableResult
+    static func commit(paths: [String], message: String, projectPath: String) async throws -> Bool {
+        let fm = FileManager.default
+        let existing = paths.filter { fm.fileExists(atPath: (projectPath as NSString).appendingPathComponent($0)) }
+        guard !existing.isEmpty else { return false }
+        let add = try await runGit(args: ["add", "--"] + existing, workingDirectory: projectPath)
+        guard add.success else { throw Error.commandFailed("git add", stderr: add.stderr) }
+        // `diff --cached --quiet` exits 0 when nothing is staged → nothing to commit.
+        let staged = try await runGit(args: ["diff", "--cached", "--quiet"], workingDirectory: projectPath)
+        if staged.success { return false }
+        let commit = try await runGit(args: ["commit", "-m", message], workingDirectory: projectPath)
+        guard commit.success else { throw Error.commandFailed("git commit", stderr: commit.stderr) }
+        return true
     }
 
     /// Files with unmerged paths (conflict markers). Empty when there's no conflict.

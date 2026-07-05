@@ -94,16 +94,26 @@ enum AttachmentService {
 
         var displaySize: String { ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file) }
         var isImage: Bool { contentType?.conforms(to: .image) ?? false }
-        var iconSymbol: String {
-            guard let ct = contentType else { return "doc" }
-            if ct.conforms(to: .image) { return "photo" }
-            if ct.conforms(to: .pdf) { return "doc.richtext" }
-            if ct.conforms(to: .movie) { return "film" }
-            if ct.conforms(to: .audio) { return "waveform" }
-            if ct.conforms(to: .sourceCode) || ct.conforms(to: .plainText) { return "doc.text" }
-            if ct.conforms(to: .archive) { return "doc.zipper" }
-            return "doc"
-        }
+        var iconSymbol: String { AttachmentService.iconSymbol(for: contentType) }
+    }
+
+    /// UTType from a filename's extension (nil when no/unknown extension).
+    static func contentType(forFilename filename: String) -> UTType? {
+        let ext = (filename as NSString).pathExtension
+        return ext.isEmpty ? nil : UTType(filenameExtension: ext)
+    }
+
+    /// The ONE UTType→SF-symbol taxonomy for attachment icons — every view that renders
+    /// an attachment row uses this (Info, the Brief FILES list, …) so icons never drift.
+    static func iconSymbol(for contentType: UTType?) -> String {
+        guard let ct = contentType else { return "doc" }
+        if ct.conforms(to: .image) { return "photo" }
+        if ct.conforms(to: .pdf) { return "doc.richtext" }
+        if ct.conforms(to: .movie) { return "film" }
+        if ct.conforms(to: .audio) { return "waveform" }
+        if ct.conforms(to: .sourceCode) || ct.conforms(to: .plainText) { return "doc.text" }
+        if ct.conforms(to: .archive) { return "doc.zipper" }
+        return "doc"
     }
 
     static func info(relativePath: String, projectRoot: String) -> Info {
@@ -119,10 +129,7 @@ enum AttachmentService {
         }
         let attrs = (try? fm.attributesOfItem(atPath: absolute.path)) ?? [:]
         let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-        let utType: UTType? = {
-            let ext = (filename as NSString).pathExtension
-            return ext.isEmpty ? nil : UTType(filenameExtension: ext)
-        }()
+        let utType = contentType(forFilename: filename)
         return Info(relativePath: relativePath,
                     filename: filename,
                     sizeBytes: size,

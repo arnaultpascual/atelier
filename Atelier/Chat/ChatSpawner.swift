@@ -112,6 +112,13 @@ final class ChatSpawner {
         let allowFiles = !dirs.isEmpty
         let toolsOn = allowWeb || allowFiles || allowFileEdit
         let agentId = UUID()
+
+        // NB: the brief chat is deliberately NOT given the MCP capability layer.
+        // In the brief stage Claude is the SOLE writer of brief.md (it edits the
+        // file directly, `allowFileEdit`), so attaching the app-side brief_* write
+        // tools here would create a two-writer race on the same file. The MCP
+        // brief_* / spec_record_finding tools live in the feature BUILD spawns
+        // (TaskSpawner), where there is no competing direct editor.
         let runner = WorkerRunner()
         let invocation = WorkerRunner.Invocation(
             prompt: promptText,

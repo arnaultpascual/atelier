@@ -225,6 +225,14 @@ enum Schema {
             }
         }
 
+        // v13 — persist the feature's base branch (what the integration branch was cut from), so
+        // "Merge & finish" merges into the RIGHT branch even after a relaunch (the run is in-memory).
+        migrator.registerMigration("v13_feature_base_branch") { db in
+            try db.alter(table: "feature") { t in
+                t.add(column: "baseBranch", .text)
+            }
+        }
+
         try migrator.migrate(pool)
     }
 }

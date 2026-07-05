@@ -20,10 +20,14 @@ final class TaskSpawner {
         runs[taskId]
     }
 
-    /// Returns true if the task has a run in a non-terminal state.
+    /// Returns true if the task has a run in a non-terminal state — OR one that is
+    /// still in its post-run tail (TDD gate + teardown). The gate can run for minutes
+    /// (JVM/.NET) after the agent status flips to `.completed`; without the `isFinishing`
+    /// window a concurrent iterate would reuse the same session paths and the finishing
+    /// run's teardown would unlink the live iterate's sockets (silently disabling approvals).
     func hasLiveWorker(for taskId: String) -> Bool {
         guard let run = runs[taskId] else { return false }
-        return !run.agent.status.isTerminal
+        return !run.agent.status.isTerminal || run.isFinishing
     }
 
     /// Drop the cached run (used when user dismisses the agent view to go back to
@@ -165,40 +169,39 @@ final class TaskSpawner {
                           store: AppStore,
                           server: ApprovalServer,
                           approvalQueue: ApprovalQueue,
-                          maxTurns: Int = 60) async -> ManagedOutcome {
+                          maxTurns: Int = 60,
+                          featureId: String? = nil,
+                          extraDenyRules: [PermissionRule] = []) async -> ManagedOutcome {
         let profile = ProjectProfile.find(id: project.profileId) ?? .generic
         let agentId = UUID()
-        let listener = ApprovalSocketListener(agentId: agentId.uuidString,
-                                              taskId: "feature-synthesis",
-                                              projectName: project.name,
-                                              queue: approvalQueue)
-        let socketPath: String
+        let session: WorkerSpawnSession
         do {
-            socketPath = try await listener.start()
+            session = try await WorkerSpawnSession.begin(
+                agentId: agentId, approvalTaskId: "feature-synthesis", project: project,
+                rulesWorktreePath: workingDirectory, server: server, approvalQueue: approvalQueue,
+                autopilot: true, mcpFeatureId: featureId, mcpTaskId: nil, store: store,
+                extraDenyRules: extraDenyRules)
         } catch {
-            logger.error("managed worker socket failed: \(error.localizedDescription, privacy: .public)")
-            return ManagedOutcome(completed: false, costUsd: 0, looksUsageLimited: false)
-        }
-        approvalQueue.loadRules(forAgent: agentId.uuidString, project: project, worktreePath: workingDirectory)
-        approvalQueue.setAutopilot(true, forAgent: agentId.uuidString)
-        let configURL: URL
-        do {
-            configURL = try MCPConfig.writeTemporaryConfig(serverName: server.serverName,
-                                                           agentId: agentId, socketPath: socketPath)
-        } catch {
-            await listener.stop(reason: "config write failed")
-            logger.error("managed worker config failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("managed worker session failed: \(error.localizedDescription, privacy: .public)")
             return ManagedOutcome(completed: false, costUsd: 0, looksUsageLimited: false)
         }
         var dirs = additionalDirs
         if !dirs.contains(project.path) { dirs.append(project.path) }
+
+        // Teach the synthesis / coverage worker to use its MCP tools (if attached).
+        var managedPrompt = prompt
+        if let fid = session.mcpFeatureId {
+            managedPrompt += "\n\n" + MCPCapability.managedWorkerGuidance(featureId: fid)
+        }
+
         let runner = WorkerRunner()
         let invocation = WorkerRunner.Invocation(
-            prompt: prompt, model: model, apiKey: apiKey, agentId: agentId,
-            settingsPath: configURL.path, workingDirectory: workingDirectory,
+            prompt: managedPrompt, model: model, apiKey: apiKey, agentId: agentId,
+            settingsPath: session.settingsPath, workingDirectory: workingDirectory,
             additionalDirs: dirs, includePartialMessages: false, maxTurns: maxTurns,
             resumeSessionId: nil,
-            extraEnv: ToolchainChecker.environmentExports(profile: profile, mainRepoPath: project.path))
+            extraEnv: ToolchainChecker.environmentExports(profile: profile, mainRepoPath: project.path),
+            mcpConfigPath: session.mcpConfigPath)
         let state = AgentState(); state.reset()
         let liveState = state
         let eventSink: @Sendable (StreamEvent) async -> Void = { event in
@@ -214,8 +217,7 @@ final class TaskSpawner {
             ok = false
             if liveState.status != .completed { liveState.markFailed(error.localizedDescription) }
         }
-        MCPConfig.cleanup(configURL)
-        await listener.stop(reason: "managed worker finished")
+        await session.tearDown(reason: "managed worker finished")
         return ManagedOutcome(completed: ok && liveState.status == .completed,
                               costUsd: liveState.totalCostUsd,
                               looksUsageLimited: liveState.looksUsageLimited)
@@ -272,49 +274,31 @@ final class TaskSpawner {
         if task.status != .inProgress && task.status != .done {
             try? await store.updateTaskStatus(task, to: .inProgress)
         }
+        // Clear any stale block reason from a PRIOR run now we're re-attempting. (We no longer
+        // clear it at teardown — a reason set by this run's `task_signal_blocked` must survive so
+        // the card and the deliverable can show it.)
+        await store.clearBlockedReason(taskId: task.id)
 
-        // 4. Start the per-spawn approval socket listener and write the MCP config
-        //    that points the helper at it.
+        // 4/5. Per-spawn scaffolding: approval socket + settings hook + (optional,
+        //      feature-scoped) MCP capability bridge — one object, one teardown.
         let agentId = UUID(uuidString: newAgent.id) ?? UUID()
-        let listener = ApprovalSocketListener(
-            agentId: agentId.uuidString,
-            taskId: task.id,
-            projectName: project.name,
-            queue: approvalQueue
-        )
-        let socketPath: String
+        let session: WorkerSpawnSession
         do {
-            socketPath = try await listener.start()
-            logger.info("approval socket: \(socketPath, privacy: .public)")
+            session = try await WorkerSpawnSession.begin(
+                agentId: agentId, approvalTaskId: task.id, project: project,
+                rulesWorktreePath: worktree.absolutePath, server: server, approvalQueue: approvalQueue,
+                autopilot: autopilot, mcpFeatureId: task.featureId, mcpTaskId: task.id, store: store)
         } catch {
-            logger.error("approval socket start failed: \(error.localizedDescription, privacy: .public)")
-            run.state.markFailed("Could not open approval socket: \(error.localizedDescription)")
-            finalize(run: run, status: .failed, store: store)
-            return
-        }
-        // Load profile + per-project permission rules into the queue so any
-        // approval the helper enqueues gets evaluated against them.
-        approvalQueue.loadRules(forAgent: agentId.uuidString,
-                                project: project,
-                                worktreePath: worktree.absolutePath)
-        if autopilot { approvalQueue.setAutopilot(true, forAgent: agentId.uuidString) }
-        let configURL: URL
-        do {
-            configURL = try MCPConfig.writeTemporaryConfig(
-                serverName: server.serverName,
-                agentId: agentId,
-                socketPath: socketPath
-            )
-        } catch {
-            logger.error("MCP config write failed: \(error.localizedDescription, privacy: .public)")
-            await listener.stop(reason: "config write failed")
-            run.state.markFailed("Could not write MCP config: \(error.localizedDescription)")
+            logger.error("worker session setup failed: \(error.localizedDescription, privacy: .public)")
+            run.state.markFailed("Could not start worker session: \(error.localizedDescription)")
             finalize(run: run, status: .failed, store: store)
             return
         }
 
-        // 6. Build prompt and additional dirs
-        let prompt = Self.buildPrompt(task: task, project: project, profile: profile, worktree: worktree)
+        // 6. Build prompt and additional dirs. When the MCP layer is attached, the
+        //    prompt also teaches the worker to use its tools (progress/spec/findings/coverage).
+        let prompt = Self.buildPrompt(task: task, project: project, profile: profile, worktree: worktree,
+                                      mcpFeatureId: session.mcpFeatureId)
         let attachmentsDir = URL(fileURLWithPath: project.path)
             .appendingPathComponent(".atelier")
             .appendingPathComponent("attachments")
@@ -324,8 +308,11 @@ final class TaskSpawner {
         if FileManager.default.fileExists(atPath: attachmentsDir) {
             additionalDirs.append(attachmentsDir)
         }
-        // Give worker access to the project root so it can read backlog/, ., etc.
-        additionalDirs.append(project.path)
+        // Deliberately do NOT --add-dir the project root: `--add-dir` grants WRITE access, and the
+        // worktree is already a full checkout of every tracked file. Adding the shared root let
+        // workers write their changes THERE (the prompt names "Project root: <root>"), polluting the
+        // integration branch's working tree and breaking the serial merge. The worker is confined to
+        // its worktree; task context is in the prompt and attachments come via `attachmentsDir` above.
 
         // 7. Launch worker
         let runner = WorkerRunner()
@@ -334,13 +321,14 @@ final class TaskSpawner {
             model: model,
             apiKey: apiKey,
             agentId: agentId,
-            settingsPath: configURL.path,
+            settingsPath: session.settingsPath,
             workingDirectory: worktree.absolutePath,
             additionalDirs: additionalDirs,
             includePartialMessages: false,
             maxTurns: 80,
             resumeSessionId: nil,
-            extraEnv: ToolchainChecker.environmentExports(profile: profile, mainRepoPath: project.path)
+            extraEnv: ToolchainChecker.environmentExports(profile: profile, mainRepoPath: project.path),
+            mcpConfigPath: session.mcpConfigPath
         )
 
         run.statusHint = ""
@@ -392,8 +380,15 @@ final class TaskSpawner {
         //    The worker is done; now Atelier runs the mode's test command in the
         //    worktree and gates on the exit code. Red → the task stays In Progress
         //    with a summary of why; green (or a mode with no test command) → Review.
+        //    Mark the run "finishing" so hasLiveWorker stays true through the gate+teardown.
+        run.isFinishing = true
         if run.agent.status == .completed {
-            if let latest = store.taskByID(task.id), latest.status == .inProgress {
+            // Gate on .inProgress OR .review: a worker can self-promote to Review via MCP
+            // (`task_update_status`), and that must NOT skip the gate — Atelier runs the tests
+            // itself and is the authority. Read the COMMITTED row (the worker just wrote it).
+            // A deliberately .blocked task is left alone.
+            let latest = await store.freshTask(task.id)
+            if let latest, latest.status == .inProgress || latest.status == .review {
                 var gated = latest
                 if profile.build.fastTestCommands.isEmpty {
                     gated.testState = .noTests
@@ -432,8 +427,10 @@ final class TaskSpawner {
                                 gated.testIntegrity = .suspect   // advisory; user can "Review test changes"
                             }
                         }
-                        if result.passed { gated.status = .review }
-                        // red → stays In Progress; the tests tab / card badge shows why.
+                        // green → Review; red → pull back to In Progress even if the worker
+                        // self-promoted to Review (red must never sit in Review). The tests
+                        // tab / card badge shows why.
+                        gated.status = result.passed ? .review : .inProgress
                     }
                     run.statusHint = ""
                 }
@@ -445,9 +442,13 @@ final class TaskSpawner {
         run.agent.endedAt = Date()
         try? await store.updateAgent(run.agent)
 
-        // 10. Cleanup temp config + socket
-        MCPConfig.cleanup(configURL)
-        await listener.stop(reason: "worker finished")
+        // 10. Tear down the per-spawn scaffolding (socket + settings + MCP).
+        await session.tearDown(reason: "worker finished")
+        // Drop the transient live-progress badge now the build phase is over. The block
+        // reason is intentionally KEPT (cleared at the next spawn's start) so a task that
+        // signalled blocked shows its reason on the card and in the deliverable.
+        await store.clearProgress(taskId: task.id)
+        run.isFinishing = false
     }
 
     /// Re-spawns a worker that `--resume`s a prior claude session for the given
@@ -510,52 +511,53 @@ final class TaskSpawner {
                                 server: ApprovalServer,
                                 approvalQueue: ApprovalQueue,
                                 autopilot: Bool = false) async {
-        let agentUUID = UUID(uuidString: run.agent.id) ?? UUID()
-        let listener = ApprovalSocketListener(
-            agentId: agentUUID.uuidString,
-            taskId: task.id,
-            projectName: project.name,
-            queue: approvalQueue
-        )
-        let socketPath: String
+        // FRESH per-spawn session identity — decoupled from the resumed agent's DB id. Reusing
+        // run.agent.id keyed the sockets/settings/mcp-config on the agent, so an iterate that
+        // overlapped the prior run's finishing tail bound the SAME paths, and the old run's
+        // teardown then unlinked this session's live sockets. A fresh UUID can't collide.
+        let sessionUUID = UUID()
+        await store.clearBlockedReason(taskId: task.id)   // re-attempting: drop a stale reason
+        let session: WorkerSpawnSession
         do {
-            socketPath = try await listener.start()
+            session = try await WorkerSpawnSession.begin(
+                agentId: sessionUUID, approvalTaskId: task.id, project: project,
+                rulesWorktreePath: worktreePath, server: server, approvalQueue: approvalQueue,
+                autopilot: autopilot, mcpFeatureId: task.featureId, mcpTaskId: task.id, store: store)
         } catch {
-            run.state.markFailed("Could not open approval socket: \(error.localizedDescription)")
-            return
-        }
-        approvalQueue.loadRules(forAgent: agentUUID.uuidString,
-                                project: project,
-                                worktreePath: worktreePath)
-        if autopilot { approvalQueue.setAutopilot(true, forAgent: agentUUID.uuidString) }
-        let configURL: URL
-        do {
-            configURL = try MCPConfig.writeTemporaryConfig(
-                serverName: server.serverName,
-                agentId: agentUUID,
-                socketPath: socketPath
-            )
-        } catch {
-            await listener.stop(reason: "config write failed")
-            run.state.markFailed("Could not write MCP config: \(error.localizedDescription)")
+            run.state.markFailed("Could not start worker session: \(error.localizedDescription)")
             return
         }
 
+        // Resumed session — if MCP is attached, remind the worker the tools are here.
+        var iterateMessage = message
+        if let fid = session.mcpFeatureId {
+            iterateMessage += "\n\n" + MCPCapability.taskWorkerGuidance(featureId: fid)
+        }
+
+        // Confined to the worktree (see execute): only the task's own attachments dir is added,
+        // NOT the shared project root — a root --add-dir grants write access and lets the worker
+        // pollute the integration branch's working tree, breaking the serial merge.
+        let attachmentsDir = URL(fileURLWithPath: project.path)
+            .appendingPathComponent(".atelier").appendingPathComponent("attachments")
+            .appendingPathComponent(task.id).path
+        let iterateDirs = FileManager.default.fileExists(atPath: attachmentsDir) ? [attachmentsDir] : []
+
         let runner = WorkerRunner()
         let invocation = WorkerRunner.Invocation(
-            prompt: message,
+            prompt: iterateMessage,
             model: run.agent.model,
             apiKey: apiKey,
-            agentId: agentUUID,
-            settingsPath: configURL.path,
+            agentId: sessionUUID,
+            settingsPath: session.settingsPath,
             workingDirectory: worktreePath,
-            additionalDirs: [project.path],
+            additionalDirs: iterateDirs,
             includePartialMessages: false,
             maxTurns: 40,
             resumeSessionId: sessionId,
             extraEnv: ToolchainChecker.environmentExports(
                 profile: ProjectProfile.find(id: project.profileId) ?? .generic,
-                mainRepoPath: project.path)
+                mainRepoPath: project.path),
+            mcpConfigPath: session.mcpConfigPath
         )
 
         run.statusHint = ""
@@ -594,11 +596,14 @@ final class TaskSpawner {
         if !run.agent.status.isTerminal {
             run.agent.status = finalStatus
         }
+        run.isFinishing = true
         run.agent.endedAt = Date()
         try? await store.updateAgent(run.agent)
 
-        MCPConfig.cleanup(configURL)
-        await listener.stop(reason: "iterate finished")
+        await session.tearDown(reason: "iterate finished")
+        // Keep any block reason this pass recorded (cleared at the next spawn's start).
+        await store.clearProgress(taskId: task.id)
+        run.isFinishing = false
     }
 
     private func finalize(run: ActiveRun, status: Agent.Status, store: AppStore) {
@@ -649,14 +654,16 @@ final class TaskSpawner {
     private static func buildPrompt(task: AtelierTask,
                                     project: Project,
                                     profile: ProjectProfile,
-                                    worktree: GitService.WorktreeInfo) -> String {
+                                    worktree: GitService.WorktreeInfo,
+                                    mcpFeatureId: String? = nil) -> String {
         var sections: [String] = []
         sections.append("# \(task.title)")
 
         var meta: [String] = []
         meta.append("Task id: `\(task.id)`")
-        meta.append("Branch: `\(worktree.branch)` (worktree under `\(worktree.relativePath)`)")
-        meta.append("Project root: `\(project.path)`")
+        // The worktree IS your working copy (a full checkout). Work here and commit here — do not
+        // reach outside it; the real project root is off-limits (it's the shared integration tree).
+        meta.append("Working copy: `\(worktree.absolutePath)` on branch `\(worktree.branch)`")
         if !task.labels.isEmpty {
             meta.append("Labels: \(task.labels.joined(separator: ", "))")
         }
@@ -699,11 +706,22 @@ final class TaskSpawner {
             sections.append(tdd.joined(separator: "\n"))
         }
 
+        // Runtime prerequisites the gate can't catch (compile + unit tests pass, app crashes at run).
+        if let rh = b.runtimeHint {
+            sections.append("## Runtime prerequisites (the test gate can't catch these)\n\nIf your task touches the relevant area, handle it — it won't fail the gate but WILL crash the running app:\n- \(rh)")
+        }
+
         sections.append("""
         ## House rules
 
         You're running in a git worktree (`\(worktree.absolutePath)`). The user reviews and merges manually — do not run `git merge`, `git push`, or `git rebase`. Commit liberally on this worktree's branch (`\(worktree.branch)`) so the user can review your diff.
         """)
+
+        // When the MCP capability layer is attached for this feature spawn, teach the
+        // worker to actually use its tools (progress, spec-referencing, findings, coverage).
+        if let mcpFeatureId {
+            sections.append(MCPCapability.taskWorkerGuidance(featureId: mcpFeatureId))
+        }
 
         return sections.joined(separator: "\n\n")
     }
@@ -719,6 +737,10 @@ final class ActiveRun {
     var state: AgentState
     var workerTask: Task<Void, Never>?
     var statusHint: String
+    /// True during the post-run tail (TDD gate + teardown), after the agent status is
+    /// terminal but before the session is torn down. Keeps `hasLiveWorker` true so no
+    /// concurrent spawn reuses this run's session resources.
+    var isFinishing = false
 
     init(taskId: String, model: String) {
         self.taskId = taskId

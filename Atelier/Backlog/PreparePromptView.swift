@@ -15,6 +15,10 @@ struct PreparePromptView: View {
     /// Fill kanban" chrome and no fixed sheet frame — so it can be embedded inline (e.g. inside the
     /// feature flow's Brief stage). nil = the standalone sheet behaviour.
     var pinnedBriefId: String? = nil
+    /// The feature this brief belongs to (embedded feature flow). Enables the persistent
+    /// shared-files store: attachments sent with a message are also copied into
+    /// `.atelier/attachments/feature-<id>/` so decompose can route them to tasks.
+    var featureId: String? = nil
     /// (briefText, attachments, inspectRepo) → seeds the Fill Kanban compose screen. Unused when embedded.
     var onSendToFillKanban: (String, [URL], Bool) -> Void = { _, _, _ in }
     var onClose: () -> Void = {}
@@ -29,6 +33,10 @@ struct PreparePromptView: View {
     @State private var briefFileContent: String = ""
     @State private var briefPreviewCollapsed: Bool = false
     @State private var attachments: [URL] = []
+    // Feature-level shared files (persisted in .atelier/attachments/feature-<id>/).
+    @State private var sharedFiles: [URL] = []
+    @State private var sharedFilesCollapsed = false
+    @State private var sharedFilesNote: String?   // store-failure feedback (never silent)
     @State private var webEnabled: Bool = false
     @State private var newLink: String = ""
     @State private var historyMessages: [ChatMessage] = []
@@ -69,8 +77,12 @@ struct PreparePromptView: View {
         }
         .modifier(EmbeddableFrame(embedded: embedded))
         .background(Color.atelierBackground)
-        .onAppear { ensureBrief() }
+        .onAppear { ensureBrief(); reloadSharedFiles() }
         .onDisappear { persistBrief() }   // keep manual brief edits on close
+        .onChange(of: store.briefRevision[pinnedBriefId ?? ""]) { _, _ in
+            // The MCP bridge wrote brief.md via a brief_* tool — refresh live.
+            if embedded { loadBriefFile() }
+        }
         .onChange(of: liveRunning) { _, running in
             guard !running else { return }
             // Claude may have edited brief.md this turn — refresh the live preview.
@@ -137,10 +149,15 @@ struct PreparePromptView: View {
                     LazyVStack(alignment: .leading, spacing: 10) {
                         ForEach(messages) { ChatBubble(message: $0) }
                         if liveRunning {
-                            HStack(spacing: 6) {
+                            HStack(spacing: 8) {
                                 ProgressView().controlSize(.small)
                                 Text("Claude is thinking…").font(AtelierFont.caption)
                                     .foregroundStyle(Color.atelierInkSecondary)
+                                Button("Stop") {
+                                    if let id = selectedBriefId { chatSpawner.cancel(roomId: id) }
+                                }
+                                .controlSize(.small)
+                                .help("Interrompre le tour en cours (le brief.md déjà écrit est conservé).")
                             }
                             .padding(.vertical, 4)
                         }
@@ -277,6 +294,12 @@ struct PreparePromptView: View {
                 }
             }
 
+            // Shared files (feature flow): attachments persisted with the feature —
+            // they survive the chat and get routed to tasks at decompose time.
+            if featureId != nil {
+                sharedFilesSection
+            }
+
             // Pinned links (WebFetch when web is on / links present).
             VStack(alignment: .leading, spacing: 4) {
                 SectionLabel("LINKS")
@@ -291,10 +314,76 @@ struct PreparePromptView: View {
                 }
             }
 
-            Text("Spec docs, screenshots & files: attach them with ＋ in the composer (images are read as images, text/PDF is extracted). Pinned folders persist across passes; attachments ride along with the message you send.")
+            Text(featureId == nil
+                 ? "Spec docs, screenshots & files: attach them with ＋ in the composer (images are read as images, text/PDF is extracted). Pinned folders persist across passes; attachments ride along with the message you send."
+                 : "Spec docs, screenshots & files: attach them with ＋ in the composer (images are read as images, text/PDF is extracted). They're kept with the feature (FILES above) and routed to the tasks that need them at decompose time.")
                 .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary.opacity(0.8))
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// Collapsible list of the feature's shared files, with image thumbnails. The chevron
+    /// hides/reveals it; removal deletes from the feature store (already-routed task copies
+    /// are unaffected).
+    private var sharedFilesSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { sharedFilesCollapsed.toggle() }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .rotationEffect(.degrees(sharedFilesCollapsed ? 0 : 90))
+                        SectionLabel("FILES")
+                        if !sharedFiles.isEmpty {
+                            Text("\(sharedFiles.count)")
+                                .font(AtelierFont.eyebrow)
+                                .foregroundStyle(Color.atelierInkSecondary.opacity(0.7))
+                        }
+                    }
+                }
+                .buttonStyle(.plain).foregroundStyle(Color.atelierInkSecondary)
+                .help("Files shared with this feature — sent to the decomposer and routed to the tasks that need them.")
+                Spacer()
+            }
+            if let note = sharedFilesNote {
+                Text(note).font(AtelierFont.caption).foregroundStyle(Palette.error)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !sharedFilesCollapsed {
+                if sharedFiles.isEmpty {
+                    Text("None — attach files with ＋ in the composer; they're kept with the feature.")
+                        .font(AtelierFont.caption).foregroundStyle(Color.atelierInkSecondary)
+                } else {
+                    ForEach(sharedFiles, id: \.self) { url in
+                        sharedFileRow(url)
+                    }
+                }
+            }
+        }
+    }
+
+    private func sharedFileRow(_ url: URL) -> some View {
+        HStack(spacing: 6) {
+            SharedFileThumb(url: url)
+            Text(url.lastPathComponent)
+                .font(AtelierFont.captionMono).foregroundStyle(Color.atelierInk)
+                .lineLimit(1).truncationMode(.middle).help(url.path)
+            Spacer(minLength: 4)
+            Button {
+                FeatureAttachments.remove(fileURL: url)
+                reloadSharedFiles()
+            } label: { Image(systemName: "xmark").font(.system(size: 9)) }
+                .buttonStyle(.plain).foregroundStyle(Color.atelierInkSecondary)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(Color.atelierBackground.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func reloadSharedFiles() {
+        guard let featureId else { sharedFiles = []; return }
+        sharedFiles = FeatureAttachments.list(projectRoot: project.path, featureId: featureId)
     }
 
     private func pinRow(text: String, full: String, onRemove: @escaping () -> Void) -> some View {
@@ -484,6 +573,28 @@ struct PreparePromptView: View {
                          allowFileEdit: embedded,   // embedded: Claude maintains brief.md live
                          contextPath: pins.first,
                          extraDirs: Array(pins.dropFirst()))
+        // Feature flow: attachments don't just ride along with this message — persist them in
+        // the feature store so they survive the chat and get routed to tasks at decompose time.
+        // Copies run OFF the main thread; failures are SURFACED (never silently dropped: the
+        // UI promises these files are "kept with the feature").
+        if let featureId {
+            let toStore = attachments
+            let projectPath = project.path
+            Task { @MainActor in
+                let failures: [String] = await Task.detached(priority: .userInitiated) {
+                    var out: [String] = []
+                    for url in toStore {
+                        do { _ = try FeatureAttachments.store(sourceURL: url, featureId: featureId,
+                                                              projectRoot: projectPath) }
+                        catch { out.append(url.lastPathComponent) }
+                    }
+                    return out
+                }.value
+                reloadSharedFiles()
+                sharedFilesNote = failures.isEmpty ? nil
+                    : "Couldn't keep \(failures.joined(separator: ", ")) with the feature — the message still carried \(failures.count == 1 ? "it" : "them"), but decompose won't be able to route \(failures.count == 1 ? "it" : "them") to tasks. Re-attach to retry."
+            }
+        }
         draft = ""
         attachments = []
     }
@@ -714,7 +825,8 @@ struct PreparePromptView: View {
         var lines = [
             "We are co-authoring the implementation brief for a feature. The brief lives in the file `brief.md` in your current working directory — it is the single source of truth (create it if it doesn't exist yet).",
             "On EVERY message from me: (1) read `brief.md`, (2) update it to reflect our evolving understanding, then (3) reply briefly IN CHAT with just what you changed and any open questions — do NOT paste the brief in chat.",
-            "Keep `brief.md` structured with: ## Goal, ## Context, ## Constraints, ## Acceptance criteria, ## Open questions. Acceptance criteria must be objectively TESTABLE — strict TDD, tests written first that then pass\(coverageClause). Resolve ambiguities by making reasonable assumptions and stating them in Context/Constraints; keep only genuinely-blocking items under Open questions."
+            "Keep `brief.md` structured with: ## Goal, ## Context, ## Constraints, ## Acceptance criteria, ## Open questions. Acceptance criteria must be objectively TESTABLE — strict TDD, tests written first that then pass\(coverageClause). Resolve ambiguities by making reasonable assumptions and stating them in Context/Constraints; keep only genuinely-blocking items under Open questions.",
+            "SCOPE — you ONLY author `brief.md`. Do NOT implement the feature, write source code, add dependencies, run build/test commands, or narrate implementation steps or 'pieces'. If I paste a full feature spec, DISTILL it into the brief (Context / Constraints / Acceptance criteria) — never build it. A task decomposer and separate build workers implement it later, elsewhere. When the brief is complete (all sections filled, no blocking open questions), reply exactly 'Brief ready.' and STOP — do not continue working."
         ]
         if let hint = profile.build.testScaffoldingHint { lines.append("Test conventions: \(hint)") }
         if !room.contextPaths.isEmpty {
@@ -845,4 +957,35 @@ private struct RefineSignal {
         let union = sa.union(sb).count
         return union == 0 ? 1 : Double(sa.intersection(sb).count) / Double(union)
     }
+}
+
+/// Small async-loaded thumbnail for a shared file: cached image preview (ImageThumbnailer)
+/// when the file is an image, else the shared attachment icon taxonomy. The nonisolated
+/// loader inherits `.task`'s cancellation — a removed/collapsed row stops decoding.
+private struct SharedFileThumb: View {
+    let url: URL
+    @State private var thumb: NSImage?
+
+    var body: some View {
+        Group {
+            if let thumb {
+                Image(nsImage: thumb)
+                    .resizable().aspectRatio(contentMode: .fill)
+                    .frame(width: 26, height: 26)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.atelierDivider, lineWidth: 0.5))
+            } else {
+                Image(systemName: AttachmentService.iconSymbol(for: contentType))
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.atelierInkSecondary)
+                    .frame(width: 26, height: 26)
+            }
+        }
+        .task(id: url) {
+            guard contentType?.conforms(to: .image) ?? false else { thumb = nil; return }
+            thumb = await ImageThumbnailer.thumbnail(at: url)
+        }
+    }
+
+    private var contentType: UTType? { AttachmentService.contentType(forFilename: url.lastPathComponent) }
 }

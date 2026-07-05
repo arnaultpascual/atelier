@@ -68,6 +68,10 @@ actor WorkerRunner {
         /// Extra env vars injected into the worker (e.g. ANDROID_HOME) so the commands it runs
         /// during TDD find the toolchain — a GUI app doesn't inherit the shell's exports.
         var extraEnv: [String: String] = [:]
+        /// When non-nil, the worker gets the Atelier MCP capability server via
+        /// `--mcp-config <path> --strict-mcp-config`. Set only for feature-scoped
+        /// spawns (behind the MCPCapability kill-switch); nil → pure file+git contract.
+        var mcpConfigPath: String? = nil
     }
 
     private let logger = Logger(subsystem: "app.atelier", category: "worker")
@@ -168,6 +172,12 @@ actor WorkerRunner {
                     "You have WebSearch and WebFetch tools available. For anything that needs current or real-time information — weather, news, prices, schedules, recent events, live status — use WebSearch first instead of replying that you lack real-time access."])
             }
         }
+        // MCP capability server (feature-scoped, opt-in). Composes with the
+        // approval `--settings` hook; `--strict-mcp-config` isolates the worker to
+        // just the atelier server (ignores the user's global MCP servers).
+        if let mcpConfigPath = invocation.mcpConfigPath, !mcpConfigPath.isEmpty {
+            arguments.append(contentsOf: ["--mcp-config", mcpConfigPath, "--strict-mcp-config"])
+        }
         if let resumeId = invocation.resumeSessionId, !resumeId.isEmpty {
             arguments.append(contentsOf: ["--resume", resumeId])
         }
@@ -201,6 +211,12 @@ actor WorkerRunner {
         // Toolchain env (e.g. ANDROID_HOME) so the worker's own build/test commands find the SDK.
         for (key, value) in invocation.extraEnv {
             if let k = Environment.Key(rawValue: key) { envOverrides[k] = value }
+        }
+        // When the MCP capability layer is attached, give MCP tool calls a generous timeout:
+        // `review_request` runs a full Opus review (minutes). claude's default tool timeout would
+        // fire mid-review, orphaning the app-side work; 10 min covers it. (extraEnv wins if set.)
+        if invocation.mcpConfigPath != nil, let k = Environment.Key(rawValue: "MCP_TOOL_TIMEOUT"), envOverrides[k] == nil {
+            envOverrides[k] = "600000"
         }
         let environment: Environment = .inherit.updating(envOverrides)
 
