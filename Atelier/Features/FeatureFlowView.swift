@@ -32,6 +32,8 @@ struct FeatureFlowView: View {
     // ③ Tasks
     @State private var decomposing = false
     @State private var decomposeError: String?
+    @State private var decomposeActivity: String?   // latest live step (repo-inspect path emits these)
+    @State private var decomposeStart: Date?        // for the elapsed timer while decomposing
     @State private var inspectRepo = true
     @State private var quickAddTitle = ""
     // ⑤ Finish
@@ -302,6 +304,7 @@ struct FeatureFlowView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent).disabled(decomposing || !briefReady)
+                    decomposeStatusLine
                     if !briefReady {
                         Text("Write the brief first (stage ②).").font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
                     }
@@ -322,6 +325,7 @@ struct FeatureFlowView: View {
                     .buttonStyle(.plain).foregroundStyle(Color.atelierAccent).disabled(decomposing)
                     .help("Generate more tasks from the brief (adds to the list).")
                 }
+                decomposeStatusLine
                 VStack(spacing: 8) { ForEach(featureTasks) { featureTaskRow($0) } }
                 quickAddRow
                 if let err = decomposeError { CalloutBanner(.danger, err) }
@@ -725,6 +729,26 @@ struct FeatureFlowView: View {
         .padding(.top, 8)
     }
 
+    /// Live status under the Decompose button: the current step (repo-inspect emits real lines like
+    /// "Reading cart.js" / "Grep …"; otherwise a generic label) + an elapsed timer, so a long
+    /// decompose shows it's actually working, not stuck.
+    @ViewBuilder private var decomposeStatusLine: some View {
+        if decomposing {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles").font(.system(size: 9)).foregroundStyle(Color.atelierAccent)
+                Text(decomposeActivity ?? "Analyse du brief…")
+                    .font(AtelierFont.eyebrow).foregroundStyle(Color.atelierInkSecondary)
+                    .lineLimit(1).truncationMode(.middle)
+                if let decomposeStart {
+                    Text(decomposeStart, style: .timer)
+                        .font(AtelierFont.eyebrow.monospacedDigit())
+                        .foregroundStyle(Color.atelierInkSecondary.opacity(0.7))
+                }
+            }
+            .transition(.opacity)
+        }
+    }
+
     private var advanceHint: String {
         switch viewedStage {
         case .brief: return "Write or refine the brief first."
@@ -763,12 +787,18 @@ struct FeatureFlowView: View {
         guard !brief.isEmpty else { return }
         decomposing = true
         decomposeError = nil
+        decomposeActivity = nil
+        decomposeStart = Date()
         let profileSnapshot = profile
         let projectSnapshot = project
         // Dedup within THIS feature — not the whole project — so it matches the feature-scoped write.
         let titles = store.tasks(inFeature: feature.id).map(\.title)
         let repoPath = inspectRepo ? project.path : nil
         let featureId = feature.id
+        // Live step ticker (fed by the streaming/repo-inspect path).
+        let onActivity: @Sendable (String) async -> Void = { line in
+            await MainActor.run { decomposeActivity = line }
+        }
         Task {
             // Shared brief files (mockups, specs) — the decomposer SEES them and assigns each
             // to the task(s) that need it; createTasks then copies them into those tasks.
@@ -779,16 +809,23 @@ struct FeatureFlowView: View {
             do {
                 let drafts = try await AIAssistant.decomposeBrief(
                     brief, project: projectSnapshot, profile: profileSnapshot,
-                    existingTitles: titles, attachments: sharedFiles, repoPath: repoPath)
+                    existingTitles: titles, attachments: sharedFiles, repoPath: repoPath,
+                    onActivity: onActivity)
                 guard !drafts.isEmpty else {
-                    await MainActor.run { decomposing = false; decomposeError = "The decomposer returned no tasks — refine the brief and try again." }
+                    await MainActor.run {
+                        decomposing = false; decomposeStart = nil; decomposeActivity = nil
+                        decomposeError = "The decomposer returned no tasks — refine the brief and try again."
+                    }
                     return
                 }
                 _ = try await store.createTasks(fromDrafts: drafts, in: projectSnapshot,
                                                 featureId: featureId, attachmentSources: sharedFiles)
-                await MainActor.run { decomposing = false }
+                await MainActor.run { decomposing = false; decomposeStart = nil; decomposeActivity = nil }
             } catch {
-                await MainActor.run { decomposing = false; decomposeError = "Decomposition failed: \(error.localizedDescription)" }
+                await MainActor.run {
+                    decomposing = false; decomposeStart = nil; decomposeActivity = nil
+                    decomposeError = "Decomposition failed: \(error.localizedDescription)"
+                }
             }
         }
     }
