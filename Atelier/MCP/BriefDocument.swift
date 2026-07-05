@@ -69,6 +69,34 @@ struct BriefDocument: Equatable {
         return out.joined(separator: "\n\n") + "\n"
     }
 
+    // MARK: Read accessors (for the recette / other consumers)
+
+    /// The trimmed body of a section, or nil if the section is absent.
+    func sectionBody(_ heading: String) -> String? {
+        indexOfSection(heading).map { sections[$0].body }
+    }
+
+    /// Bullet texts under a section, with leading `- `, checkbox (`[ ]`/`[x]`) and a
+    /// `[PRIORITY]` tag stripped. Non-bullet lines are ignored. [] if the section is absent.
+    func bullets(in heading: String) -> [String] {
+        guard let body = sectionBody(heading) else { return [] }
+        var out: [String] = []
+        for raw in body.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("- ") else { continue }
+            var text = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+            for box in ["[ ]", "[x]", "[X]"] where text.hasPrefix(box) {
+                text = String(text.dropFirst(box.count)).trimmingCharacters(in: .whitespaces)
+            }
+            // Strip a leading "[PRIORITY] " tag (requirements use it).
+            if text.hasPrefix("["), let close = text.firstIndex(of: "]") {
+                text = String(text[text.index(after: close)...]).trimmingCharacters(in: .whitespaces)
+            }
+            if !text.isEmpty { out.append(text) }
+        }
+        return out
+    }
+
     // MARK: Section helpers
 
     private func canonicalRank(_ heading: String) -> Int? {
