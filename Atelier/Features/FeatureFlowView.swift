@@ -24,6 +24,7 @@ struct FeatureFlowView: View {
     @State private var coverageStatus: CoverageEnablement.Status?
     @State private var wiringCoverage = false
     @State private var coverageNote: String?
+    @State private var coverageNeedsCommit = false
     @State private var advancing = false
     // ③ Tasks
     @State private var decomposing = false
@@ -221,12 +222,25 @@ struct FeatureFlowView: View {
                     if coverageNote == nil {
                         CalloutBanner(.info, "Coverage isn't configured for this \(profile.name) project. Wire \(tool) so the build can measure coverage vs the soft 90% aim (data-driven TDD). Optional — it never blocks you.")
                     }
-                    Button {
-                        wireCoverage()
-                    } label: {
-                        Label("Wire \(tool) coverage", systemImage: "chart.bar.doc.horizontal")
+                    HStack(spacing: 8) {
+                        Button {
+                            wireCoverage()
+                        } label: {
+                            Label("Wire \(tool) coverage", systemImage: "chart.bar.doc.horizontal")
+                        }
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+                        // Shown only when the last attempt was refused for a dirty tree: the dirty
+                        // file is usually Atelier's own scaffold amendment (.gitignore). Commit JUST
+                        // the scaffold paths (never a blanket add of the user's work), then wire.
+                        if coverageNeedsCommit {
+                            Button {
+                                commitSetupAndWire()
+                            } label: {
+                                Label("Committer le setup & wire", systemImage: "checkmark.seal")
+                            }
+                            .controlSize(.small)
+                        }
                     }
-                    .buttonStyle(.borderedProminent).controlSize(.small)
                 }
             }
         }
@@ -889,10 +903,37 @@ struct FeatureFlowView: View {
     private func loadCoverageStatus() async {
         guard viewedStage == .prerequisites else { coverageStatus = nil; coverageNote = nil; return }
         coverageNote = nil   // drop any stale success/failure note on (re)entry so the button returns
+        coverageNeedsCommit = false
         let profile = self.profile
         let path = project.path
         // Bounded filesystem scan — keep it off the main actor.
         coverageStatus = await Task.detached { CoverageEnablement.status(profile: profile, projectPath: path) }.value
+    }
+
+    /// Commits ONLY Atelier's scaffold paths (never the user's other work), then retries wiring.
+    /// The dirty tracked file that trips the guard on a fresh add is Atelier's own `.gitignore`
+    /// amendment; this lands it (plus backlog/ + .atelier/config.yml) as a clean setup commit.
+    private func commitSetupAndWire() {
+        coverageNeedsCommit = false
+        coverageNote = nil
+        let projectPath = project.path
+        Task { @MainActor in
+            do {
+                let committed = try await GitService.commit(
+                    paths: [".gitignore", "backlog", ".atelier/config.yml"],
+                    message: "chore: Atelier setup", projectPath: projectPath)
+                if !committed {
+                    // Nothing of ours to commit → the dirty files are the user's; don't touch them.
+                    coverageNote = "The uncommitted changes aren't Atelier's setup — commit or stash your own work first, then wire."
+                    coverageNeedsCommit = false
+                    return
+                }
+            } catch {
+                coverageNote = "Couldn't commit the setup: \(error.localizedDescription)"
+                return
+            }
+            wireCoverage()   // tree should be clean now → proceeds
+        }
     }
 
     /// Spawns a one-shot setup worker (opt-in) to wire the mode's coverage tooling in
@@ -901,6 +942,7 @@ struct FeatureFlowView: View {
         guard !wiringCoverage, let instructions = CoverageEnablement.setupInstructions(profile: profile) else { return }
         wiringCoverage = true
         coverageNote = nil
+        coverageNeedsCommit = false
         let prompt = """
         You are wiring code-coverage tooling into this project as a one-time setup. Work in the current directory (the project root). This is infrastructure only.
 
@@ -929,7 +971,8 @@ struct FeatureFlowView: View {
             let clean = (try? await GitService.isClean(projectPath: project.path, includeUntracked: false)) ?? false
             guard clean else {
                 wiringCoverage = false
-                coverageNote = "You have uncommitted changes to tracked files — commit or stash them first, then wire coverage so the setup lands in its own clean commit."
+                coverageNeedsCommit = true   // offer the one-click "commit the scaffold & wire"
+                coverageNote = "Uncommitted changes to tracked files (often Atelier's own .gitignore setup). Commit the setup — or your own work — first, then wire so the setup lands in a clean commit."
                 return
             }
             let outcome = await spawner.runManagedWorker(

@@ -172,7 +172,7 @@ struct ProjectProfile: Identifiable, Hashable, Sendable {
             // time; coverage_get reads whatever report the worktree has. coverageSetup wires one.
             probeFiles: ["vitest.config.ts", "vitest.config.js", "vitest.config.mts", "vite.config.ts", "vite.config.js", "jest.config.js", "jest.config.ts", "package.json"],
             markers: ["@vitest/coverage-v8", "coverage-v8", "collectcoverage", "--coverage", "\"coverage\""],
-            toolName: "Vitest coverage",
+            toolName: "Vitest",   // label is "Wire \(toolName) coverage" — noun only, avoid "coverage coverage"
             instructions: """
             Wire test coverage so a report is produced under coverage/ (lcov.info + coverage-summary.json). Do this and NOTHING else — no app/test changes.
             - Prefer Vitest: add @vitest/coverage-v8 as a devDependency and configure `test.coverage` with reporter ['lcov','json-summary'] in the vite/vitest config; add a `coverage` script running the test runner with --coverage. For Jest projects, enable collectCoverage with coverageReporters ['lcovonly','json-summary'] instead.

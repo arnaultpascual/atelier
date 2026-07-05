@@ -371,6 +371,25 @@ enum GitService {
         return r.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// Stages ONLY the given paths (those that exist) and commits them — never a blanket
+    /// `add -A`, so the user's other uncommitted work is left untouched. Returns false if
+    /// there was nothing of ours staged to commit. Used to land Atelier's own scaffold
+    /// (.gitignore / backlog / .atelier/config.yml) as a clean setup commit.
+    @discardableResult
+    static func commit(paths: [String], message: String, projectPath: String) async throws -> Bool {
+        let fm = FileManager.default
+        let existing = paths.filter { fm.fileExists(atPath: (projectPath as NSString).appendingPathComponent($0)) }
+        guard !existing.isEmpty else { return false }
+        let add = try await runGit(args: ["add", "--"] + existing, workingDirectory: projectPath)
+        guard add.success else { throw Error.commandFailed("git add", stderr: add.stderr) }
+        // `diff --cached --quiet` exits 0 when nothing is staged → nothing to commit.
+        let staged = try await runGit(args: ["diff", "--cached", "--quiet"], workingDirectory: projectPath)
+        if staged.success { return false }
+        let commit = try await runGit(args: ["commit", "-m", message], workingDirectory: projectPath)
+        guard commit.success else { throw Error.commandFailed("git commit", stderr: commit.stderr) }
+        return true
+    }
+
     /// Files with unmerged paths (conflict markers). Empty when there's no conflict.
     static func unmergedFiles(projectPath: String) async throws -> [String] {
         let r = try await runGit(args: ["diff", "--name-only", "--diff-filter=U"], workingDirectory: projectPath)
