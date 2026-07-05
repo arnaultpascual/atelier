@@ -111,6 +111,7 @@ final class MCPServerCoreTests: XCTestCase {
             .flatMap { $0.result?["resources"]?.arrayValue }?.compactMap { $0["uri"]?.stringValue } ?? []
         XCTAssertTrue(uris.contains("atelier://feature/F1/spec"))
         XCTAssertTrue(uris.contains("atelier://feature/F1/brief"))
+        XCTAssertTrue(uris.contains("atelier://feature/F1/attachments"))
     }
 
     func testResourcesListEmptyWithoutFeature() async {

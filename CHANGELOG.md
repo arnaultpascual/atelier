@@ -56,6 +56,20 @@ All notable changes to Atelier are documented here. The format is based on
     across all these modes, matching the MCP `coverage_get` tool. (Swift and a TS-library mode are
     intentionally deferred — SwiftPM/Xcode duality and heuristic overlap respectively.)
 
+- **Brief attachments pipeline** — files shared during the Brief stage (mockups, spec PDFs,
+  screenshots) no longer evaporate after the message that carried them:
+  - They're **persisted with the feature** (`.atelier/attachments/feature-<id>/`) and shown in a
+    collapsible **FILES** section (chevron + image thumbnails) under the pinned folders in the
+    Brief stage, with per-file removal.
+  - At decompose time the decomposer **sees them and assigns each file to the task(s) whose worker
+    must see it** (a mockup → the screen task) via a new `attachments` field on task drafts; the
+    assigned files are **copied into those tasks' own attachment folders**, so the existing spawn
+    plumbing (`## Attachments` prompt section + `--add-dir`) physically delivers the mockup to the
+    Compose worker. The standalone Fill-Kanban flow routes the same way.
+  - A new MCP resource `atelier://feature/{id}/attachments` lists the shared files (name + path) so
+    any feature worker can discover and `Read` them (images render natively); worker guidance
+    mentions it.
+
 - **Coverage tooling enablement (prerequisites)** — the feature-flow Prerequisites step now detects
   whether the project has coverage tooling wired for its mode and, if not, offers a **one-time,
   opt-in** setup (its own commit) so `coverage_get` / the dossier have a real report to read. Per

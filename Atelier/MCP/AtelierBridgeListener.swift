@@ -144,19 +144,37 @@ actor AtelierBridgeListener {
             return .success(id: req.id, result: nil)
 
         case "resource_read":
-            // Resolve the living-brief URL on @MainActor (store access only), then
-            // read the file OFF the main actor (no blocking I/O on MainActor).
-            let (featureFound, url): (Bool, URL?) = await MainActor.run {
-                guard let feature = store.featureByID(featureId) else { return (false, nil) }
-                return (true, feature.briefRoomId.flatMap { store.chatRoom(id: $0) }?.briefFileURL)
-            }
-            switch Self.briefResolution(featureFound: featureFound, briefURL: url) {
-            case .notFound(let err):
-                return .failure(id: req.id, error: err)
-            case .empty:
-                return .success(id: req.id, result: Self.markdownResource(""))
-            case .url(let fileURL):
-                return .success(id: req.id, result: Self.markdownResource(Self.readBriefFile(fileURL)))
+            // Route by EXACT URI (a suffix/fallthrough match would let a wrong feature id,
+            // a per-file sub-URI, or a typo silently return the wrong content).
+            let uri = req.args["uri"]?.stringValue ?? ""
+            switch Self.resourceKind(uri: uri, featureId: featureId) {
+            case .attachments:
+                // Same feature-existence contract as spec/brief: a deleted feature must
+                // fail loudly, not answer "no shared files".
+                let featureExists = await MainActor.run { store.featureByID(featureId) != nil }
+                guard featureExists else {
+                    return .failure(id: req.id, error: "feature \(featureId) not found")
+                }
+                let listing = Self.attachmentsListing(
+                    files: FeatureAttachments.list(projectRoot: projectPath, featureId: featureId))
+                return .success(id: req.id, result: Self.markdownResource(listing))
+            case .spec, .brief:
+                // The living brief/spec: resolve the URL on @MainActor (store access only),
+                // then read the file OFF the main actor (no blocking I/O on MainActor).
+                let (featureFound, url): (Bool, URL?) = await MainActor.run {
+                    guard let feature = store.featureByID(featureId) else { return (false, nil) }
+                    return (true, feature.briefRoomId.flatMap { store.chatRoom(id: $0) }?.briefFileURL)
+                }
+                switch Self.briefResolution(featureFound: featureFound, briefURL: url) {
+                case .notFound(let err):
+                    return .failure(id: req.id, error: err)
+                case .empty:
+                    return .success(id: req.id, result: Self.markdownResource(""))
+                case .url(let fileURL):
+                    return .success(id: req.id, result: Self.markdownResource(Self.readBriefFile(fileURL)))
+                }
+            case .unknown:
+                return .failure(id: req.id, error: "unknown resource uri: \(uri) — this worker serves atelier://feature/\(featureId)/{spec|brief|attachments}")
             }
 
         case let op where op.hasPrefix("brief_") || op == "spec_record_finding":
@@ -415,5 +433,28 @@ actor AtelierBridgeListener {
 
     static func markdownResource(_ text: String) -> JSONValue {
         .object(["text": .string(text), "mimeType": .string("text/markdown")])
+    }
+
+    /// Resource routing decision (unit-tested): EXACT match against the three URIs this
+    /// worker's feature serves. A URI for another feature, a per-file sub-URI, or a typo
+    /// is `.unknown` and must fail — never fall through to a different resource's content.
+    enum ResourceKind: Equatable, Sendable { case spec, brief, attachments, unknown }
+    static func resourceKind(uri: String, featureId: String) -> ResourceKind {
+        switch uri {
+        case "atelier://feature/\(featureId)/spec": return .spec
+        case "atelier://feature/\(featureId)/brief": return .brief
+        case "atelier://feature/\(featureId)/attachments": return .attachments
+        default: return .unknown
+        }
+    }
+
+    /// Markdown listing of the feature's shared files (unit-tested): filename + absolute
+    /// path per line, so a worker can `Read` any of them (images are read natively).
+    static func attachmentsListing(files: [URL]) -> String {
+        guard !files.isEmpty else {
+            return "No shared files for this feature."
+        }
+        let rows = files.map { "- \($0.lastPathComponent) — `\($0.path)`" }
+        return "# Feature shared files\n\nRead any of these with the Read tool (images render natively):\n\n" + rows.joined(separator: "\n") + "\n"
     }
 }

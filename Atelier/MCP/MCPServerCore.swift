@@ -191,6 +191,12 @@ public struct MCPServerCore: Sendable {
                 "description": .string("The living brief.md — same document as the spec."),
                 "mimeType": .string("text/markdown"),
             ]),
+            .object([
+                "uri": .string("atelier://feature/\(fid)/attachments"),
+                "name": .string("Feature shared files"),
+                "description": .string("Files the user shared with the brief (mockups, specs, screenshots): names + paths — Read the paths to view them."),
+                "mimeType": .string("text/markdown"),
+            ]),
         ]
     }
 

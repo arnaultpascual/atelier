@@ -324,6 +324,10 @@ enum AIAssistant {
         var workerModel: String?      // raw model id (nil = use project default)
         var ref: String?              // model-assigned ref ("t1") for dependency wiring
         var dependsOnRefs: [String] = []   // refs of tasks this one needs done first
+        /// Attachment FILENAMES (from the brief's shared files) the decomposer assigned to
+        /// this task — e.g. the mockup image routed to the UI task. Copied into the task's
+        /// own attachment folder at creation so the worker physically receives them.
+        var attachments: [String] = []
     }
 
     /// Opus 4.8 decomposer. Takes a free-form brief / spec / dump and emits
@@ -347,12 +351,17 @@ enum AIAssistant {
             : existingTitles.prefix(20).map { "- \($0)" }.joined(separator: "\n")
 
         let att = buildAttachmentContext(attachments)
+        let attachmentNames = attachments.map(\.lastPathComponent)
         let attachmentSection = att.isEmpty ? "" : """
 
 
-        Reference attachments (the user added these as extra context). Treat them as source \
-        material and EXTRACT every relevant detail INTO the task descriptions, so each task is \
-        self-contained — a worker only ever sees its own task, never these attachments.
+        Reference attachments (the user shared these with the brief). Treat them as source \
+        material: EXTRACT every relevant detail INTO the task descriptions, AND — since a file \
+        can be physically handed to a worker — ASSIGN each attachment (by exact filename) to the \
+        task(s) whose worker must SEE it, via that task's `attachments` field. Example: a UI \
+        mockup image goes on the task that implements that screen; an API spec PDF goes on the \
+        endpoint task. A file may be assigned to several tasks; leave `attachments: []` where none apply.
+        Available attachment filenames: \(attachmentNames.joined(separator: ", "))
         \(att.images.isEmpty ? "" : "\(att.images.count) image(s) are attached to this message — read them.")
         \(att.text.isEmpty ? "" : "Extracted text from attachments:\n\(att.text)")
         \(att.skipped.isEmpty ? "" : "Could not read (ignore these): \(att.skipped.joined(separator: "; ")).")
@@ -450,6 +459,8 @@ enum AIAssistant {
         - priority: low | medium | high | critical.
         - labels: lowercase, ≤ 3, from profile suggestions when relevant.
         - depends_on: ids this task needs done first ([] if independent).
+        - attachments: exact filenames (from the attachment list above, if any) this task's \
+        worker must SEE — e.g. the mockup for the screen it implements. [] if none.
         - suggested_model: one of
             claude-opus-4-8              (refactors / multi-file / architectural / ambiguous)
             claude-sonnet-4-6            (default for feature work)
@@ -466,6 +477,7 @@ enum AIAssistant {
               "priority": "medium",
               "labels": ["..."],
               "depends_on": [],
+              "attachments": [],
               "suggested_model": "claude-sonnet-4-6"
             }
           ]
@@ -500,7 +512,8 @@ enum AIAssistant {
         return try parseTaskDrafts(raw)
     }
 
-    private static func parseTaskDrafts(_ raw: String) throws -> [TaskDraft] {
+    // Internal (not private) so the tolerant parsing — incl. the attachments field — is unit-testable.
+    static func parseTaskDrafts(_ raw: String) throws -> [TaskDraft] {
         let stripped = stripCodeFences(raw)
         // The model sometimes wraps the JSON in prose or a partial answer (e.g.
         // after hitting the turn limit). Pull out the outermost {...} and parse
@@ -531,6 +544,9 @@ enum AIAssistant {
             let deps = ((dict["depends_on"] as? [Any]) ?? [])
                 .compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
+            let attachmentNames = ((dict["attachments"] as? [Any]) ?? [])
+                .compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
             return TaskDraft(
                 title: String(title.prefix(120)),
                 descriptionMd: description,
@@ -538,7 +554,8 @@ enum AIAssistant {
                 labels: labels.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty },
                 workerModel: model,
                 ref: (ref?.isEmpty ?? true) ? nil : ref,
-                dependsOnRefs: deps
+                dependsOnRefs: deps,
+                attachments: attachmentNames
             )
         }
     }

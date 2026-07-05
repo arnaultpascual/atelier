@@ -29,6 +29,7 @@ enum MCPCapability {
         You're building one task of a larger feature. Atelier gives you live tools over MCP — call them, don't just work quietly:
         - **Report progress**: call `mcp__atelier__task_report_progress` with a percent (0–100) and a short note at each milestone, so the human watches this task advance on the board.
         - **Reference the original spec**: read the resource `atelier://feature/\(featureId)/spec` before you make design decisions, and again if you're unsure — it is the source of truth. Do NOT silently deviate from it.
+        - **Shared files**: `atelier://feature/\(featureId)/attachments` lists the files the user shared with the brief (mockups, specs, screenshots) with their paths — Read them when your work touches what they describe (your task's own `## Attachments` section, when present, is the subset assigned to you).
         - **Record what you discover**: if the spec turns out impossible, or an API/library can't do what it assumed, call `mcp__atelier__spec_record_finding` (what you found + your workaround) so the sibling workers and the reviewer see it — don't just quietly work around it.
         - **Coverage**: before you finish, call `mcp__atelier__coverage_get` (soft aim ≥ 90%); use `mcp__atelier__coverage_uncovered` to see exactly which files still need tests.
         - **If you're stuck**: call `mcp__atelier__task_signal_blocked` with the reason (and what would unblock you) instead of guessing — it surfaces to the human immediately.

@@ -228,7 +228,7 @@ struct FeatureFlowView: View {
         VStack(alignment: .leading, spacing: 16) {
             stageHeading(.brief)
             if let roomId = live.briefRoomId, store.chatRoom(id: roomId) != nil {
-                PreparePromptView(store: store, chatSpawner: chatSpawner, project: project, pinnedBriefId: roomId)
+                PreparePromptView(store: store, chatSpawner: chatSpawner, project: project, pinnedBriefId: roomId, featureId: live.id)
                     .frame(height: 600)
                     .background(Color.atelierSurface.opacity(0.25), in: RoundedRectangle(cornerRadius: AtelierCorner.card))
                     .overlay(RoundedRectangle(cornerRadius: AtelierCorner.card).stroke(Color.atelierDivider, lineWidth: 1))
@@ -294,6 +294,11 @@ struct FeatureFlowView: View {
                 VStack(spacing: 8) { ForEach(featureTasks) { featureTaskRow($0) } }
                 quickAddRow
                 if let err = decomposeError { CalloutBanner(.danger, err) }
+                // Attachment-routing warnings from the last decompose (unmatched names,
+                // failed copies) — a task must never silently lose its mockup.
+                if !store.attachmentRoutingWarnings.isEmpty {
+                    CalloutBanner(.warning, store.attachmentRoutingWarnings.joined(separator: "\n"))
+                }
             }
             advanceBar(primaryTitle: "Continue to Build", canAdvance: !featureTasks.isEmpty)
         }
@@ -692,15 +697,22 @@ struct FeatureFlowView: View {
         let repoPath = inspectRepo ? project.path : nil
         let featureId = feature.id
         Task {
+            // Shared brief files (mockups, specs) — the decomposer SEES them and assigns each
+            // to the task(s) that need it; createTasks then copies them into those tasks.
+            // Scanned off the click path (directory I/O never blocks the button).
+            let sharedFiles = await Task.detached {
+                FeatureAttachments.list(projectRoot: projectSnapshot.path, featureId: featureId)
+            }.value
             do {
                 let drafts = try await AIAssistant.decomposeBrief(
                     brief, project: projectSnapshot, profile: profileSnapshot,
-                    existingTitles: titles, repoPath: repoPath)
+                    existingTitles: titles, attachments: sharedFiles, repoPath: repoPath)
                 guard !drafts.isEmpty else {
                     await MainActor.run { decomposing = false; decomposeError = "The decomposer returned no tasks — refine the brief and try again." }
                     return
                 }
-                _ = try await store.createTasks(fromDrafts: drafts, in: projectSnapshot, featureId: featureId)
+                _ = try await store.createTasks(fromDrafts: drafts, in: projectSnapshot,
+                                                featureId: featureId, attachmentSources: sharedFiles)
                 await MainActor.run { decomposing = false }
             } catch {
                 await MainActor.run { decomposing = false; decomposeError = "Decomposition failed: \(error.localizedDescription)" }
